@@ -8,6 +8,15 @@
 __pycache__/
 *.pyc
 
+# Test and lint caches
+.pytest_cache/
+.ruff_cache/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
 # IDE
 .vscode/
 
