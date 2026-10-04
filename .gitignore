@@ -17,6 +17,11 @@ build/
 dist/
 *.egg-info/
 
+# Local source documents and generated ingestion output
+/data/incoming/
+/data/raw/
+/data/processed/
+
 # IDE
 .vscode/
 
