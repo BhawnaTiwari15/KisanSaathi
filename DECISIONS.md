@@ -114,8 +114,16 @@
 
 ## 2026-10-05: Add deterministic LangGraph orchestration skeleton
 
-**Decision:** Introduce `kisansathi.orchestration` with `build_graph(retriever)` using `StateGraph`, `START`, `END` from `langgraph.graph`, and a plain `TypedDict` state. The graph injects the retrieval dependency (existing interface), performs explicit conditional routing (`route_request` -> `retrieval` or `clarify`), calls `retriever.retrieve()` only on the retrieval path, and produces `AssistantResponse` objects in `finalize_response`. No checkpointer, no LLM, weather, vision, Whisper, translation, TTS, tools, or external services.
+**Decision:** Introduce `kisansathi.orchestration` with `build_graph(retriever)` using `StateGraph`, `START`, `END` from `langgraph.graph`, and a plain `TypedDict` state. The graph injects the retrieval dependency (existing interface), performs explicit conditional routing (`route_request` -> `retrieval` or `clarify`), calls `retriever.retrieve()` only on the retrieval path, and produces `AssistantResponse` objects in `finalize_response`. No checkpointer, no LLM, vision, Whisper, translation, TTS, tools, or external services.
 
 **Reason:** This establishes the first orchestration boundary without modifying retrieval or domain schemas, keeps routing deterministic and testable, and isolates the provisional rule so it can be replaced later.
 
 **Trade-off:** The routing logic is intentionally simple (length/word-count heuristic) and not robust NLP; answer generation remains absent and responses explicitly state that limitation.
+
+## 2026-10-05: Add Open-Meteo weather tool with transport isolation
+
+**Decision:** Add `kisansathi.weather` with typed models (`WeatherRequest`, `WeatherCurrent`, `WeatherForecastPoint`, `WeatherResponse`), explicit exceptions (`WeatherError` and specific subclasses), and `OpenMeteoClient` using a `Transport` Protocol. Use the official Open-Meteo `/v1/forecast` endpoint with no API key, stdlib HTTP (`urllib`) with explicit timeout, and strict validation (latitude [-90,90], longitude [-180,180]). Keep HTTP isolated behind the transport and the tool independent from LangGraph; weather results remain outside graph state until the graph actually needs them.
+
+**Reason:** Isolates I/O for testability (fake transports), matches existing domain/model style (frozen dataclasses + validation), provides explicit error taxonomy (invalid coordinates, timeout, HTTP/API failure, malformed response, unavailable data), and avoids adding external HTTP dependencies.
+
+**Trade-off:** Uses stdlib HTTP (no retries/caching); kept minimal (current fields only by default, optional forecast). No geocoding, LLM, or answer generation included.
