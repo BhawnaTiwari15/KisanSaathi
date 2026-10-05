@@ -111,3 +111,11 @@
 **Reason:** Human labels ground evaluation in the source text and avoid circularly deriving relevance from retriever outputs. Reporting both metrics distinguishes the project's "at least one relevant result" hit criterion from standard multi-relevant-document recall.
 
 **Trade-off:** Relevant IDs are specific to the processed corpus version. Any re-ingestion or chunking change that changes IDs requires human review of the associated labels; the English baseline does not establish multilingual quality.
+
+## 2026-10-05: Add deterministic LangGraph orchestration skeleton
+
+**Decision:** Introduce `kisansathi.orchestration` with `build_graph(retriever)` using `StateGraph`, `START`, `END` from `langgraph.graph`, and a plain `TypedDict` state. The graph injects the retrieval dependency (existing interface), performs explicit conditional routing (`route_request` -> `retrieval` or `clarify`), calls `retriever.retrieve()` only on the retrieval path, and produces `AssistantResponse` objects in `finalize_response`. No checkpointer, no LLM, weather, vision, Whisper, translation, TTS, tools, or external services.
+
+**Reason:** This establishes the first orchestration boundary without modifying retrieval or domain schemas, keeps routing deterministic and testable, and isolates the provisional rule so it can be replaced later.
+
+**Trade-off:** The routing logic is intentionally simple (length/word-count heuristic) and not robust NLP; answer generation remains absent and responses explicitly state that limitation.
