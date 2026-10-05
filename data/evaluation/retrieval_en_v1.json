@@ -1,0 +1,70 @@
+{
+  "evaluation_set_version": "retrieval-en-v1",
+  "corpus_version": "processed-v1:pm-kisan-revised-faq@95d4e2892b4b351e599bf903f8c6f89b20d4b74831eb8f1a0e61a2a66771ff86;mh-pdmc-notification-2026-27@963dacb1c00d88ff163a20968a62943e1652aa27d74249ebf9f9d1690a54afcf",
+  "examples": [
+    {
+      "query": "Which farmer families are eligible for PM-KISAN benefits?",
+      "relevant_chunk_ids": [
+        "pm-kisan-revised-faq:2787659275fd0ef87c939e28",
+        "pm-kisan-revised-faq:75ee388fe9c50b9419d6aea2"
+      ]
+    },
+    {
+      "query": "Which categories of people are excluded from PM-KISAN benefits?",
+      "relevant_chunk_ids": [
+        "pm-kisan-revised-faq:16cfad383d6c894338931f62",
+        "pm-kisan-revised-faq:56b08d8aa185e49141da6d74",
+        "pm-kisan-revised-faq:2312d143e86c2d0f5364b87b"
+      ]
+    },
+    {
+      "query": "How much support does PM-KISAN provide, and how often are payments made?",
+      "relevant_chunk_ids": [
+        "pm-kisan-revised-faq:75ee388fe9c50b9419d6aea2",
+        "pm-kisan-revised-faq:253f2217c855d17c2dfdf2dd"
+      ]
+    },
+    {
+      "query": "What information and documents are required to enroll in PM-KISAN?",
+      "relevant_chunk_ids": [
+        "pm-kisan-revised-faq:07e8df2f1d787a879de2a7a2"
+      ]
+    },
+    {
+      "query": "When was PM-KISAN launched, and when did it take effect?",
+      "relevant_chunk_ids": [
+        "pm-kisan-revised-faq:75ee388fe9c50b9419d6aea2"
+      ]
+    },
+    {
+      "query": "Can farmers with more than two hectares receive PM-KISAN benefits?",
+      "relevant_chunk_ids": [
+        "pm-kisan-revised-faq:243b03dc90dece3b3146d967"
+      ]
+    },
+    {
+      "query": "Are tenant farmers without land in their own name eligible for PM-KISAN?",
+      "relevant_chunk_ids": [
+        "pm-kisan-revised-faq:33ff2db494c59ab1ca6c4f76"
+      ]
+    },
+    {
+      "query": "What is the Maharashtra PDMC micro-irrigation scheme intended to provide?",
+      "relevant_chunk_ids": [
+        "mh-pdmc-notification-2026-27:9ef55eed1fd6c6517bc0f081"
+      ]
+    },
+    {
+      "query": "What training and field support must micro-irrigation manufacturers provide?",
+      "relevant_chunk_ids": [
+        "mh-pdmc-notification-2026-27:76f304d9157a8f438802552b"
+      ]
+    },
+    {
+      "query": "How is the micro-irrigation subsidy credited to farmers?",
+      "relevant_chunk_ids": [
+        "mh-pdmc-notification-2026-27:0acc966119bab61c3eef68be"
+      ]
+    }
+  ]
+}

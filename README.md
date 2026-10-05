@@ -1,6 +1,6 @@
 # KisanSaathi
 
-KisanSaathi is a multilingual, multimodal AI assistant for farmers. The current implementation includes the Python foundation and an offline ingestion pipeline for manually curated, official PDF sources. Retrieval, RAG, eligibility, model integrations, and user interfaces are not implemented.
+KisanSaathi is a multilingual, multimodal AI assistant for farmers. The current implementation includes the Python foundation, an offline ingestion pipeline for manually curated official PDF sources, dense, BM25, and hybrid retrieval, a lazy second-stage reranker, a local Qdrant vector-store abstraction, and explicit JSONL indexing. Automatic PDF downloading/indexing, RAG, eligibility, and user interfaces are not implemented.
 
 ## Requirements
 
@@ -17,7 +17,7 @@ py -3.12 -m venv .venv
 python -m pip install -e ".[dev]"
 ```
 
-From Command Prompt, activate with `.venv\Scripts\activate.bat` instead. The runtime dependency is PyMuPDF, used to extract text and layout information from local PDFs. The optional development install provides pytest and Ruff; tests use Python's standard library test runner.
+From Command Prompt, activate with `.venv\Scripts\activate.bat` instead. Runtime dependencies include PyMuPDF for extracting text and layout information from local PDFs, Sentence Transformers for embeddings and cross-encoder reranking, and Qdrant for local vector storage. The embedding service defaults to `BAAI/bge-m3`; the reranker defaults to multilingual `BAAI/bge-reranker-v2-m3`. Configure them through `KISANSAATHI_EMBEDDING_MODEL_NAME` and `KISANSAATHI_RERANKER_MODEL_NAME`. Both models load lazily when first used; their weights may need to be downloaded then. BM25 uses the Python standard library's SQLite FTS5 support and persists at `data/bm25.sqlite3` by default; configure the path with `KISANSAATHI_BM25_STORAGE_PATH`. Qdrant uses local persistent storage at `data/qdrant`, collection `kisansathi_chunks`, and vector dimension 1024 by default. Configure these with `KISANSAATHI_QDRANT_STORAGE_PATH`, `KISANSAATHI_QDRANT_COLLECTION_NAME`, and `KISANSAATHI_EMBEDDING_DIMENSION`. Stores do not automatically index PDFs; explicitly index processed JSONL chunks.
 
 Copy `.env.example` to `.env` when configuring local settings. Do not put secrets in `.env.example` or commit `.env`. Settings are read from process environment variables; this foundation does not parse `.env` files automatically.
 
@@ -44,6 +44,12 @@ python -m compileall -q src tests
 
 After installing the development extra, `python -m pytest` and `ruff check .` are also available.
 
+## Retrieval evaluation
+
+The hand-labeled English baseline is `data/evaluation/retrieval_en_v1.json`, tied to the exact processed corpus checksums in its `corpus_version`. Run it from the project root with `python -m kisansathi.evaluation` after explicitly populating the dense and BM25 stores. The evaluator compares DenseRetriever, BM25Retriever, HybridRetriever, and HybridRetriever followed by Reranker, reporting per-query results and aggregate metrics.
+
+The project's binary `recall_at_5` is Hit Rate@5: a query scores 1 if at least one relevant chunk is in the top five, otherwise 0. True Recall@5 is also reported as the per-query fraction of relevant chunks found in the top five, macro-averaged across queries. Labels are hand-reviewed against the source documents to avoid circularly judging systems by their own results. Since labels point to chunk IDs, re-ingestion or changed chunking requires reviewing and updating the affected labels.
+
 ## Current scope
 
-No retrieval, embeddings, vector database, BM25, reranking, RAG, eligibility rules, model integrations, external tools, orchestration, or user interface have been implemented. The shared conversation schemas remain separate from ingestion-owned document models.
+`HybridRetriever` combines dense and BM25 rankings with Reciprocal Rank Fusion. `Reranker` can then rescore a bounded candidate set with query-document CrossEncoder relevance scores; this second-stage operation is separate from dense, BM25, and RRF scoring. RAG, eligibility rules, external tools, orchestration, and user interface have not been implemented. `CorpusIndexer` explicitly indexes one processed JSONL file at a time into the dense store; `BM25Store.index_file()` separately builds the local lexical index from the same chunks. Ingestion does not automatically embed or index PDFs.

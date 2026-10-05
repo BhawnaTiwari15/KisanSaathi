@@ -21,6 +21,8 @@ dist/
 /data/incoming/
 /data/raw/
 /data/processed/
+/data/qdrant/
+/data/bm25.sqlite3
 
 # IDE
 .vscode/
