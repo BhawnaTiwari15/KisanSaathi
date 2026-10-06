@@ -34,6 +34,14 @@ from kisansathi.generation.models import (
 )
 from kisansathi.language import DeterministicLanguageDetector, LanguageDetector
 from kisansathi.retrieval.vector_store import SearchResult
+from kisansathi.voice import (
+    EmptyTranscriptError,
+    InvalidAudioError,
+    SpeechToText,
+    SpeechToTextError,
+    TranscriptionError,
+    TranscriptionResult,
+)
 from kisansathi.weather.exceptions import WeatherError
 from kisansathi.weather.models import WeatherCurrent, WeatherRequest, WeatherResponse
 
@@ -45,6 +53,7 @@ class Route(StrEnum):
     ELIGIBILITY = "eligibility"
     WEATHER = "weather"
     CLARIFY = "clarify"
+    FINALIZE = "finalize"
 
 
 _ROUTE_NODES: dict[str, str] = {
@@ -52,6 +61,7 @@ _ROUTE_NODES: dict[str, str] = {
     Route.ELIGIBILITY: "eligibility",
     Route.WEATHER: "weather",
     Route.CLARIFY: "clarify",
+    Route.FINALIZE: "finalize_response",
 }
 
 _TOKEN_STRIP = ".,?!:;\"'()[]{}-"
@@ -101,6 +111,8 @@ class OrchestrationState(TypedDict):
     generated_answer: NotRequired[GeneratedAnswer | None]
     validated_citations: NotRequired[tuple[Citation, ...] | None]
     detected_language: NotRequired[Language | None]
+    audio_data: NotRequired[bytes | None]
+    audio_content_type: NotRequired[str | None]
 
 
 class _RetrieverProtocol:
@@ -137,6 +149,12 @@ class _AnswerGeneratorProtocol(Protocol):
 class _LanguageDetectorProtocol(Protocol):
     def detect(self, text: str) -> Language | None:
         """Detect the language of the given text."""
+        ...
+
+
+class _SpeechToTextProtocol(Protocol):
+    def transcribe(self, audio_data: bytes, *, content_type: str | None = None) -> TranscriptionResult:
+        """Transcribe audio data to text."""
         ...
 
 
@@ -404,6 +422,7 @@ def build_graph(
     eligibility_evaluator: _EligibilityEvaluatorProtocol | None = None,
     answer_generator: _AnswerGeneratorProtocol | None = None,
     language_detector: _LanguageDetectorProtocol | None = None,
+    speech_to_text: _SpeechToTextProtocol | None = None,
 ) -> StateGraph:
     """Build the deterministic orchestration graph.
 
@@ -415,15 +434,152 @@ def build_graph(
     deterministic placeholder responses. When injected, the generator produces grounded
     answers that are then validated against the resolved citation batch.
     Passing ``language_detector=None`` uses a deterministic script-based detector as default.
+    Passing ``speech_to_text=None`` keeps the text-only path unchanged; when injected,
+    audio input is transcribed before routing.
     """
 
     evaluator = evaluate if eligibility_evaluator is None else eligibility_evaluator
     generator = answer_generator
     detector = language_detector or DeterministicLanguageDetector()
+    stt = speech_to_text
 
     graph = StateGraph(OrchestrationState)
 
+    def speech_to_text_node(state: OrchestrationState) -> OrchestrationState:
+        """Transcribe audio to text if audio input is provided.
+
+        If no audio input is present, passes through unchanged.
+        On transcription failure, returns a fallback response with appropriate status.
+        """
+        if stt is None:
+            return state
+
+        audio_data = state.get("audio_data")
+        content_type = state.get("audio_content_type")
+
+        if not audio_data:
+            return state
+
+        try:
+            # Validate audio input
+            from kisansathi.voice.audio import validate_audio_input
+            validate_audio_input(audio_data, content_type or "audio/wav")
+
+            # Transcribe
+            result = stt.transcribe(audio_data, content_type=content_type)
+
+            # Validate transcription
+            from kisansathi.voice.audio import validate_transcription_result
+            text = validate_transcription_result(result.text)
+
+            # Map Whisper language to supported language
+            from kisansathi.voice.audio import map_whisper_language_to_supported
+            whisper_lang = map_whisper_language_to_supported(result.language)
+
+            # Determine the language for the transcribed message.
+            # Priority: explicit user language (from original message) > Whisper detected > detector > English.
+            # If the original message had an explicit language, preserve it.
+            original_language = state["message"].language
+            whisper_language = result.language
+            # Use explicit user language if set, otherwise Whisper detected, otherwise English
+            user_language = original_language if original_language is not None else (whisper_language if whisper_language is not None else Language.ENGLISH)
+            message = UserMessage(
+                text=text,
+                language=user_language,
+                latitude=state["message"].latitude,
+                longitude=state["message"].longitude,
+            )
+
+            return {
+                **state,
+                "message": message,
+                # Clear audio data after transcription
+                "audio_data": None,
+                "audio_content_type": None,
+            }
+
+        except InvalidAudioError as e:
+            # Invalid audio format -> ABSTAINED
+            lang = state["message"].language or Language.ENGLISH
+            return {
+                **state,
+                "response": AssistantResponse(
+                    text="I could not process the audio. Please check the format and try again.",
+                    language=lang,
+                    status=ResponseStatus.ABSTAINED,
+                    citations=(),
+                ),
+                "audio_data": None,
+                "audio_content_type": None,
+            }
+        except EmptyTranscriptError as e:
+            # Empty transcript -> NEEDS_CLARIFICATION
+            lang = state["message"].language or Language.ENGLISH
+            return {
+                **state,
+                "response": AssistantResponse(
+                    text="I could not understand the audio. Please speak clearly and try again.",
+                    language=lang,
+                    status=ResponseStatus.NEEDS_CLARIFICATION,
+                    citations=(),
+                ),
+                "audio_data": None,
+                "audio_content_type": None,
+            }
+        except TranscriptionError as e:
+            # Transcription error: check if it's a service availability issue
+            error_msg = str(e).lower()
+            lang = state["message"].language or Language.ENGLISH
+            if "unavailable" in error_msg or "service" in error_msg:
+                # Service unavailable -> ABSTAINED
+                return {
+                    **state,
+                    "response": AssistantResponse(
+                        text="Speech recognition service is unavailable. Please try again later.",
+                        language=lang,
+                        status=ResponseStatus.ABSTAINED,
+                        citations=(),
+                    ),
+                    "audio_data": None,
+                    "audio_content_type": None,
+                }
+            # Other transcription errors (timeout, model error) -> NEEDS_CLARIFICATION
+            return {
+                **state,
+                "response": AssistantResponse(
+                    text="I could not understand the audio. Please speak clearly and try again.",
+                    language=lang,
+                    status=ResponseStatus.NEEDS_CLARIFICATION,
+                    citations=(),
+                ),
+                "audio_data": None,
+                "audio_content_type": None,
+            }
+        except SpeechToTextError as e:
+            # Other speech-to-text errors -> ABSTAINED
+            lang = state["message"].language or Language.ENGLISH
+            return {
+                **state,
+                "response": AssistantResponse(
+                    text="Speech recognition service is unavailable. Please try again later.",
+                    language=lang,
+                    status=ResponseStatus.ABSTAINED,
+                    citations=(),
+                ),
+                "audio_data": None,
+                "audio_content_type": None,
+            }
+
     def route_request(state: OrchestrationState) -> OrchestrationState:
+        # If a terminal response (ABSTAINED/NEEDS_CLARIFICATION) is already set by a previous node
+        # (e.g., speech_to_text failure), preserve it and skip routing to go directly to finalize.
+        existing_response = state.get("response")
+        if existing_response is not None and existing_response.status in (
+            ResponseStatus.ABSTAINED,
+            ResponseStatus.NEEDS_CLARIFICATION,
+        ):
+            return {**state, "route": Route.FINALIZE}
+
         message = state["message"]
         if _is_underspecified(message):
             return {**state, "route": Route.CLARIFY}
@@ -668,6 +824,12 @@ def build_graph(
     def finalize_response(state: OrchestrationState) -> OrchestrationState:
         message = state["message"]
         route = state.get("route")
+        if route == Route.FINALIZE:
+            # Terminal response already set by error handler; pass it through
+            existing_response = state.get("response")
+            if existing_response is None:
+                existing_response = _build_clarification_response(message)
+            return {**state, "response": existing_response}
         if route == Route.CLARIFY:
             existing_response = state.get("response")
             if existing_response is None:
@@ -744,6 +906,7 @@ def build_graph(
         )
         return {**state, "response": response}
 
+    graph.add_node("speech_to_text", speech_to_text_node)
     graph.add_node("route_request", route_request)
     graph.add_node("detect_language", detect_language)
     graph.add_node("retrieve", retrieve)
@@ -755,17 +918,27 @@ def build_graph(
     graph.add_node("clarify", clarify)
     graph.add_node("finalize_response", finalize_response)
 
-    graph.add_edge(START, "route_request")
+    graph.add_edge("__start__", "speech_to_text")
+    graph.add_edge("speech_to_text", "route_request")
+    # route_request determines the route; if a terminal response is already set, go directly to finalize
+    # For retrieval/eligibility, run language detection first; weather/clarify/finalize bypass it.
     graph.add_conditional_edges(
         "route_request",
         lambda state: state["route"],
+        {
+            Route.RETRIEVAL: "detect_language",
+            Route.ELIGIBILITY: "detect_language",
+            Route.WEATHER: "weather",
+            Route.CLARIFY: "clarify",
+            Route.FINALIZE: "finalize_response",
+        },
+    )
+    # Language detection runs before retrieval/eligibility
+    graph.add_conditional_edges(
+        "detect_language",
+        lambda state: state["route"],
         _ROUTE_NODES,
     )
-    # Language detection runs after routing, before evidence gathering
-    graph.add_edge("detect_language", "retrieve")
-    graph.add_edge("detect_language", "eligibility")
-    graph.add_edge("detect_language", "weather")
-    graph.add_edge("detect_language", "clarify")
     # Retrieval and eligibility paths go through citation resolution and generation
     graph.add_edge("retrieve", "resolve_citations")
     graph.add_edge("eligibility", "resolve_citations")

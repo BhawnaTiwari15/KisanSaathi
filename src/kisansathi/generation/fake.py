@@ -56,7 +56,7 @@ class FakeAnswerGenerator:
         if answer is None:
             answer = GeneratedAnswer(
                 text="Fake answer from test generator.",
-                citation_ids=("chunk-1",),
+                citation_ids=(),
                 status=ResponseStatus.ANSWERED,
                 language=Language.ENGLISH,
             )
@@ -67,7 +67,17 @@ class FakeAnswerGenerator:
         self.calls.append(context)
         if isinstance(self._answer, Exception):
             raise self._answer
-        return self._answer
+        # If the answer has no explicit citation_ids, use the ones from the context
+        if self._answer.citation_ids:
+            return self._answer
+        # Use citation IDs from the context's citation batch
+        citation_ids = tuple(context.citations.citation_ids) if context.citations else ()
+        return GeneratedAnswer(
+            text=self._answer.text,
+            citation_ids=citation_ids,
+            status=self._answer.status,
+            language=self._answer.language,
+        )
 
 
 def make_fake_generated_answer(
