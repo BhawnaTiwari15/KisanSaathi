@@ -127,3 +127,11 @@
 **Reason:** Isolates I/O for testability (fake transports), matches existing domain/model style (frozen dataclasses + validation), provides explicit error taxonomy (invalid coordinates, timeout, HTTP/API failure, malformed response, unavailable data), and avoids adding external HTTP dependencies.
 
 **Trade-off:** Uses stdlib HTTP (no retries/caching); kept minimal (current fields only by default, optional forecast). No geocoding, LLM, or answer generation included.
+
+## 2026-10-06: Add deterministic PM-KISAN eligibility evaluation
+
+**Decision:** Add kisansathi.eligibility with frozen dataclasses (EligibilityRequest, EvidenceRef, EligibilityRule, RuleSet, EligibilityDecision), a two-member RuleKind vocabulary (must_be_true, must_be_false), and evaluate(request, *, rules=PM_KISAN) as a pure function with no retrieval, I/O, or model calls. Implement four PM-KISAN conditions, each carrying a verbatim excerpt of a real ingested chunk plus an EvidenceRef (source_id, sha256, chunk_id, page range, locator) pinned to the corpus checksum. Rules live as versioned Python literals, not runtime JSON. Request facts are tri-state (ool | None), so an unknown fact is reported rather than defaulted. Precedence is unsupported scheme > ineligible > insufficient information > eligible. Conditions the corpus does not support are recorded in UNSUPPORTED_CONDITIONS with a reason and locator instead of being approximated.
+
+**Reason:** Eligibility must stay deterministic and auditable, so every rule is justified by exact source text rather than general knowledge, and OCR-damaged, date-dependent, or heading-only conditions are documented as unsupported rather than reconstructed. Keeping the evaluator free of LangGraph and retrieval dependencies preserves this milestone's boundary and lets the evaluator be injected into the graph later as a plain dependency.
+
+**Trade-off:** Only four conditions are evaluable, so most real-world PM-KISAN exclusions return insufficient_information rather than a verdict. Excerpt provenance cannot be re-verified in CI because data/processed is gitignored, so substring verification is an opt-in test that skips when the corpus is absent; structural provenance is asserted unconditionally.
