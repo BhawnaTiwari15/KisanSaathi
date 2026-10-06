@@ -7,7 +7,7 @@ from typing import NotRequired, Protocol, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from kisansathi.citations.models import CitationBatch, CitationError, RejectedCitation
-from kisansathi.citations.resolver import CitationResolver
+from kisansathi.citations.resolver import CitationResolver, validate_referenced_citations
 from kisansathi.domain.schemas import (
     AssistantResponse,
     Citation,
@@ -22,6 +22,14 @@ from kisansathi.eligibility.models import (
     EligibilityError,
     EligibilityRequest,
     EligibilityStatus,
+)
+from kisansathi.generation.models import (
+    AnswerGenerator,
+    GeneratedAnswer,
+    GenerationError,
+    GroundingError,
+    LLMError,
+    MalformedOutputError,
 )
 from kisansathi.retrieval.vector_store import SearchResult
 from kisansathi.weather.exceptions import WeatherError
@@ -88,6 +96,8 @@ class OrchestrationState(TypedDict):
     citations: NotRequired[CitationBatch | None]
     eligibility_decision: NotRequired[EligibilityDecision | None]
     eligibility_request: NotRequired[EligibilityRequest | None]
+    generated_answer: NotRequired[GeneratedAnswer | None]
+    validated_citations: NotRequired[tuple[Citation, ...] | None]
 
 
 class _RetrieverProtocol:
@@ -112,6 +122,12 @@ class _EligibilityEvaluatorProtocol(Protocol):
         self, request: EligibilityRequest, *, rules: object = ...
     ) -> EligibilityDecision:
         """Evaluate one eligibility request and return its decision."""
+        ...
+
+
+class _AnswerGeneratorProtocol(Protocol):
+    def generate(self, context: object) -> GeneratedAnswer:
+        """Generate an answer from grounded context."""
         ...
 
 
@@ -377,6 +393,7 @@ def build_graph(
     *,
     citation_resolver: CitationResolver | None = None,
     eligibility_evaluator: _EligibilityEvaluatorProtocol | None = None,
+    answer_generator: _AnswerGeneratorProtocol | None = None,
 ) -> StateGraph:
     """Build the deterministic orchestration graph.
 
@@ -384,11 +401,13 @@ def build_graph(
     the graph performs no I/O. Passing ``weather_client=None`` keeps the weather route
     reachable but answers it without calling a client. Passing ``citation_resolver=None``
     keeps the retrieval and eligibility routes reachable but publishes no citations, which
-    is the original behaviour. Both defaults leave those routes unable to fabricate
-    anything, since citations are only ever produced by the injected resolver.
+    is the original behaviour. Passing ``answer_generator=None`` keeps all routes using
+    deterministic placeholder responses. When injected, the generator produces grounded
+    answers that are then validated against the resolved citation batch.
     """
 
     evaluator = evaluate if eligibility_evaluator is None else eligibility_evaluator
+    generator = answer_generator
 
     graph = StateGraph(OrchestrationState)
 
@@ -469,6 +488,92 @@ def build_graph(
             )
         return {**state, "citations": batch}
 
+    def generate_answer(state: OrchestrationState) -> OrchestrationState:
+        """Generate a grounded answer using the injected AnswerGenerator.
+
+        If no generator is configured, passes through with generated_answer=None.
+        Failures are caught and converted to a safe fallback answer with appropriate
+        status so the graph never crashes and never fabricates citations.
+        """
+        if generator is None:
+            return {**state, "generated_answer": None}
+
+        from kisansathi.generation.models import GenerationContext
+
+        context = GenerationContext(
+            message=state["message"],
+            citations=state.get("citations") or CitationBatch(),
+            eligibility_decision=state.get("eligibility_decision"),
+            weather=state.get("weather"),
+        )
+
+        try:
+            answer = generator.generate(context)
+        except LLMError:
+            # Infrastructure failure (network, timeout, provider error) -> ABSTAINED
+            return {
+                **state,
+                "generated_answer": GeneratedAnswer(
+                    text="I could not generate an answer due to a service error. Please try again later.",
+                    citation_ids=(),
+                    status=ResponseStatus.ABSTAINED,
+                    language=state["message"].language or Language.ENGLISH,
+                ),
+            }
+        except (MalformedOutputError, GroundingError):
+            # Model misbehaved (bad format, hallucinated citation) -> NEEDS_CLARIFICATION
+            return {
+                **state,
+                "generated_answer": GeneratedAnswer(
+                    text="I could not produce a reliable answer from the available sources.",
+                    citation_ids=(),
+                    status=ResponseStatus.NEEDS_CLARIFICATION,
+                    language=state["message"].language or Language.ENGLISH,
+                ),
+            }
+        except GenerationError:
+            # Any other generation error -> NEEDS_CLARIFICATION
+            return {
+                **state,
+                "generated_answer": GeneratedAnswer(
+                    text="I could not produce a reliable answer from the available sources.",
+                    citation_ids=(),
+                    status=ResponseStatus.NEEDS_CLARIFICATION,
+                    language=state["message"].language or Language.ENGLISH,
+                ),
+            }
+
+        return {**state, "generated_answer": answer}
+
+    def validate_and_attach_citations(state: OrchestrationState) -> OrchestrationState:
+        """Post-generation citation validation using the existing resolver gate.
+
+        If the generator produced an answer with citation IDs, validate them against
+        the resolved CitationBatch. On validation failure, fall back to a safe answer.
+        """
+        answer = state.get("generated_answer")
+        batch = state.get("citations") or CitationBatch()
+
+        if answer is None or not answer.citation_ids:
+            return {**state, "validated_citations": ()}
+
+        try:
+            validated = validate_referenced_citations(answer.citation_ids, batch)
+        except Exception:
+            # Model cited an ID that wasn't in the batch -> NEEDS_CLARIFICATION
+            return {
+                **state,
+                "generated_answer": GeneratedAnswer(
+                    text="I could not verify the sources for my answer.",
+                    citation_ids=(),
+                    status=ResponseStatus.NEEDS_CLARIFICATION,
+                    language=answer.language,
+                ),
+                "validated_citations": (),
+            }
+
+        return {**state, "validated_citations": validated}
+
     def weather(state: OrchestrationState) -> OrchestrationState:
         message = state["message"]
         coordinates = _resolve_coordinates(message)
@@ -522,17 +627,49 @@ def build_graph(
                 return {**state, "response": existing_response}
             return {**state, "response": _build_weather_response(message, weather_result)}
         if route == Route.ELIGIBILITY:
+            # Use generated answer if available, otherwise fall back to deterministic response
+            answer = state.get("generated_answer")
+            validated = state.get("validated_citations") or ()
+            if answer is not None:
+                return {
+                    **state,
+                    "response": AssistantResponse(
+                        text=answer.text,
+                        language=answer.language,
+                        status=answer.status,
+                        citations=validated,
+                    ),
+                }
+            # Fallback to deterministic response (uses citations from resolver)
             response = _build_eligibility_response(
                 message,
                 state.get("eligibility_decision"),
                 state.get("citations"),
             )
             return {**state, "response": response}
+        # Retrieval route
+        answer = state.get("generated_answer")
+        validated = state.get("validated_citations") or ()
+        batch = state.get("citations")
+
+        # If a generator was configured, generated_answer will be set (even on fallback).
+        # If no generator was configured, generated_answer is None and we use the raw batch.
+        if answer is not None:
+            return {
+                **state,
+                "response": AssistantResponse(
+                    text=answer.text,
+                    language=answer.language,
+                    status=answer.status,
+                    citations=validated,
+                ),
+            }
+        # No generator configured: use the raw citation batch for the placeholder
         retrieved = state.get("retrieved_chunks") or ()
         response = _build_retrieval_response(
             message,
             len(retrieved),
-            state.get("citations"),
+            batch if batch else CitationBatch(),
         )
         return {**state, "response": response}
 
@@ -540,6 +677,8 @@ def build_graph(
     graph.add_node("retrieve", retrieve)
     graph.add_node("eligibility", eligibility)
     graph.add_node("resolve_citations", resolve_citations)
+    graph.add_node("generate_answer", generate_answer)
+    graph.add_node("validate_and_attach_citations", validate_and_attach_citations)
     graph.add_node("weather", weather)
     graph.add_node("clarify", clarify)
     graph.add_node("finalize_response", finalize_response)
@@ -550,9 +689,13 @@ def build_graph(
         lambda state: state["route"],
         _ROUTE_NODES,
     )
+    # Retrieval and eligibility paths go through generation
     graph.add_edge("retrieve", "resolve_citations")
     graph.add_edge("eligibility", "resolve_citations")
-    graph.add_edge("resolve_citations", "finalize_response")
+    graph.add_edge("resolve_citations", "generate_answer")
+    graph.add_edge("generate_answer", "validate_and_attach_citations")
+    graph.add_edge("validate_and_attach_citations", "finalize_response")
+    # Weather and clarify paths bypass generation entirely (no document evidence)
     graph.add_edge("weather", "finalize_response")
     graph.add_edge("clarify", "finalize_response")
     graph.add_edge("finalize_response", END)
