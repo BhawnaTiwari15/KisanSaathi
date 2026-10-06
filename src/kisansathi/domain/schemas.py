@@ -19,10 +19,28 @@ class ResponseStatus(StrEnum):
 class UserMessage:
     text: str
     language: Language | None = None
+    latitude: float | None = None
+    longitude: float | None = None
 
     def __post_init__(self) -> None:
         if not self.text.strip():
             raise ValueError("Message text must not be empty")
+        _validate_optional_coordinate(self.latitude, "latitude", -90.0, 90.0)
+        _validate_optional_coordinate(self.longitude, "longitude", -180.0, 180.0)
+
+
+def _validate_optional_coordinate(
+    value: float | None,
+    field_name: str,
+    minimum: float,
+    maximum: float,
+) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{field_name} must be a number or None")
+    if value < minimum or value > maximum:
+        raise ValueError(f"{field_name} must be within [{minimum:g}, {maximum:g}]")
 
 
 @dataclass(frozen=True, slots=True)
