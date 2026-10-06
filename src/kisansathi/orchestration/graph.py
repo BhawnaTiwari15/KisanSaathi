@@ -1,16 +1,27 @@
 """Deterministic LangGraph orchestration skeleton."""
 
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import NotRequired, Protocol, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from kisansathi.citations.models import CitationBatch, CitationError, RejectedCitation
+from kisansathi.citations.resolver import CitationResolver
 from kisansathi.domain.schemas import (
     AssistantResponse,
     Citation,
     Language,
     ResponseStatus,
     UserMessage,
+)
+from kisansathi.eligibility.evaluator import evaluate
+from kisansathi.eligibility.models import (
+    FACT_NAMES,
+    EligibilityDecision,
+    EligibilityError,
+    EligibilityRequest,
+    EligibilityStatus,
 )
 from kisansathi.retrieval.vector_store import SearchResult
 from kisansathi.weather.exceptions import WeatherError
@@ -21,17 +32,23 @@ class Route(StrEnum):
     """The routes the request may take out of ``route_request``."""
 
     RETRIEVAL = "retrieval"
+    ELIGIBILITY = "eligibility"
     WEATHER = "weather"
     CLARIFY = "clarify"
 
 
 _ROUTE_NODES: dict[str, str] = {
     Route.RETRIEVAL: "retrieve",
+    Route.ELIGIBILITY: "eligibility",
     Route.WEATHER: "weather",
     Route.CLARIFY: "clarify",
 }
 
 _TOKEN_STRIP = ".,?!:;\"'()[]{}-"
+
+# Marker for provenance that failed to resolve before it could be attributed to any
+# source. It is only ever a rejection reason, never a citation.
+_UNRESOLVED_SOURCE = "<unresolved>"
 
 _WEATHER_KEYWORDS = frozenset(
     {
@@ -46,6 +63,19 @@ _WEATHER_KEYWORDS = frozenset(
     }
 )
 
+# Deliberately narrow. Terms such as "enrollment", "excluded" and "categories" are
+# excluded because they also occur in document questions that must keep reaching
+# retrieval rather than the eligibility evaluator.
+_ELIGIBILITY_KEYWORDS = frozenset(
+    {
+        "eligible",
+        "eligibility",
+        "योग्य",
+        "पात्र",
+        "पात्रता",
+    }
+)
+
 
 class OrchestrationState(TypedDict):
     """Graph state for the orchestration skeleton."""
@@ -55,6 +85,9 @@ class OrchestrationState(TypedDict):
     retrieved_chunks: tuple[SearchResult, ...]
     response: AssistantResponse
     weather: NotRequired[WeatherResponse | None]
+    citations: NotRequired[CitationBatch | None]
+    eligibility_decision: NotRequired[EligibilityDecision | None]
+    eligibility_request: NotRequired[EligibilityRequest | None]
 
 
 class _RetrieverProtocol:
@@ -71,6 +104,14 @@ class _WeatherClientProtocol(Protocol):
         forecast_days: int = 1,
     ) -> WeatherResponse:
         """Return current weather for the requested coordinates."""
+        ...
+
+
+class _EligibilityEvaluatorProtocol(Protocol):
+    def __call__(
+        self, request: EligibilityRequest, *, rules: object = ...
+    ) -> EligibilityDecision:
+        """Evaluate one eligibility request and return its decision."""
         ...
 
 
@@ -94,6 +135,47 @@ def _has_weather_intent(message: UserMessage) -> bool:
     """
     tokens = message.text.lower().split()
     return any(token.strip(_TOKEN_STRIP) in _WEATHER_KEYWORDS for token in tokens)
+
+
+def _has_eligibility_intent(message: UserMessage) -> bool:
+    """Return True if the message matches a provisional eligibility keyword.
+
+    Provisional for the same reason as ``_has_weather_intent``: a fixed keyword set with
+    no scoring, no stemming and no model. Matching an intent does not imply an answer is
+    available, because eligibility still needs structured facts from the caller.
+    """
+    tokens = message.text.lower().split()
+    return any(token.strip(_TOKEN_STRIP) in _ELIGIBILITY_KEYWORDS for token in tokens)
+
+
+def _coerce_eligibility_request(value: object) -> EligibilityRequest | None:
+    """Return a trustworthy EligibilityRequest, or None when the input cannot supply one.
+
+    Facts are never inferred. Only the four conditions in ``FACT_NAMES`` are read, every
+    non-boolean is treated as not supplied, and the request is rebuilt through
+    ``EligibilityRequest`` so its own validation still applies. A malformed request is
+    reported as absent rather than partially trusted.
+    """
+    if isinstance(value, EligibilityRequest):
+        scheme: object = value.scheme
+        supplied = {fact: getattr(value, fact) for fact in FACT_NAMES}
+    elif isinstance(value, Mapping):
+        scheme = value.get("scheme")
+        supplied = {fact: value.get(fact) for fact in FACT_NAMES}
+    else:
+        return None
+
+    if not isinstance(scheme, str) or not scheme.strip():
+        return None
+
+    facts = {
+        fact: item if isinstance(item, bool) else None
+        for fact, item in supplied.items()
+    }
+    try:
+        return EligibilityRequest(scheme=scheme, **facts)
+    except EligibilityError:
+        return None
 
 
 def _resolve_coordinates(message: UserMessage) -> tuple[float, float] | None:
@@ -122,24 +204,108 @@ def _build_clarification_response(message: UserMessage) -> AssistantResponse:
     )
 
 
-def _build_retrieval_response(message: UserMessage, chunk_count: int) -> AssistantResponse:
-    """Create a response noting that retrieval occurred but generation is not implemented."""
+def _build_retrieval_response(
+    message: UserMessage,
+    chunk_count: int,
+    batch: CitationBatch | None = None,
+) -> AssistantResponse:
+    """Create a response noting that retrieval occurred but generation is not implemented.
+
+    Provenance that resolved is attached, so the citations already point at real pages of
+    registered documents. When every retrieved chunk was refused, no claim can be
+    attributed to anything, so the response abstains instead of citing nothing while
+    still sounding answered.
+    """
     language = message.language or Language.ENGLISH
-    if chunk_count <= 0:
+    citations: tuple[Citation, ...] = batch.citations if batch is not None else ()
+    if chunk_count > 0 and not citations and batch is not None and batch.rejected:
         text = (
-            "I retrieved relevant excerpts from the available sources, "
-            "but answer generation has not yet been implemented."
+            "I could not verify the sources behind these excerpts, "
+            "so I am not citing them."
         )
-    else:
-        text = (
-            "I retrieved relevant excerpts from the available sources, "
-            "but answer generation has not yet been implemented."
+        return AssistantResponse(
+            text=text,
+            language=language,
+            status=ResponseStatus.ABSTAINED,
+            citations=(),
         )
+    text = (
+        "I retrieved relevant excerpts from the available sources, "
+        "but answer generation has not yet been implemented."
+    )
     return AssistantResponse(
         text=text,
         language=language,
         status=ResponseStatus.ANSWERED,
-        citations=(),
+        citations=citations,
+    )
+
+
+def _build_eligibility_response(
+    message: UserMessage,
+    decision: EligibilityDecision | None,
+    batch: CitationBatch | None,
+) -> AssistantResponse:
+    """Render an eligibility outcome and its citations, refusing unciteable verdicts.
+
+    The decision summary is deterministic text from the rule set, not generated prose, so
+    it is safe to state directly. A verdict that cannot cite its own evidence is withheld:
+    reporting "you are not eligible" without a source would be an unauditable claim about
+    a farmer's benefit.
+    """
+    language = message.language or Language.ENGLISH
+    citations: tuple[Citation, ...] = batch.citations if batch is not None else ()
+
+    if decision is None:
+        return AssistantResponse(
+            text=(
+                "I cannot determine eligibility without the required facts. "
+                "Please provide the following so I can check them against the official "
+                f"guidelines: {', '.join(FACT_NAMES)}."
+            ),
+            language=language,
+            status=ResponseStatus.NEEDS_CLARIFICATION,
+            citations=(),
+        )
+
+    if decision.status is EligibilityStatus.UNSUPPORTED_SCHEME:
+        return AssistantResponse(
+            text=decision.summary,
+            language=language,
+            status=ResponseStatus.ABSTAINED,
+            citations=(),
+        )
+
+    if decision.status is EligibilityStatus.INSUFFICIENT_INFORMATION:
+        return AssistantResponse(
+            text=(
+                f"{decision.summary} "
+                f"Please provide the following: {', '.join(decision.missing_facts)}."
+            ),
+            language=language,
+            status=ResponseStatus.NEEDS_CLARIFICATION,
+            citations=(),
+        )
+
+    if not citations:
+        return AssistantResponse(
+            text=(
+                "I reached a determination, but I could not verify the official documents "
+                "behind it, so I am withholding it rather than stating it without a source."
+            ),
+            language=language,
+            status=ResponseStatus.ABSTAINED,
+            citations=(),
+        )
+
+    return AssistantResponse(
+        text=(
+            f"{decision.summary} "
+            "This determination is based only on the official documents cited below."
+        ),
+        language=language,
+        status=ResponseStatus.ANSWERED,
+        citations=citations,
     )
 
 
@@ -208,13 +374,21 @@ def _build_weather_response(
 def build_graph(
     retriever: _RetrieverProtocol,
     weather_client: _WeatherClientProtocol | None = None,
+    *,
+    citation_resolver: CitationResolver | None = None,
+    eligibility_evaluator: _EligibilityEvaluatorProtocol | None = None,
 ) -> StateGraph:
     """Build the deterministic orchestration graph.
 
-    The weather client is injected rather than held in graph state, so building and
-    compiling the graph performs no I/O. Passing ``weather_client=None`` keeps the
-    weather route reachable but answers it without calling a client.
+    Collaborators are injected rather than held in graph state, so building and compiling
+    the graph performs no I/O. Passing ``weather_client=None`` keeps the weather route
+    reachable but answers it without calling a client. Passing ``citation_resolver=None``
+    keeps the retrieval and eligibility routes reachable but publishes no citations, which
+    is the original behaviour. Both defaults leave those routes unable to fabricate
+    anything, since citations are only ever produced by the injected resolver.
     """
+
+    evaluator = evaluate if eligibility_evaluator is None else eligibility_evaluator
 
     graph = StateGraph(OrchestrationState)
 
@@ -224,12 +398,76 @@ def build_graph(
             return {**state, "route": Route.CLARIFY}
         if _has_weather_intent(message):
             return {**state, "route": Route.WEATHER}
+        if _has_eligibility_intent(message):
+            return {**state, "route": Route.ELIGIBILITY}
         return {**state, "route": Route.RETRIEVAL}
 
     def retrieve(state: OrchestrationState) -> OrchestrationState:
         message = state["message"]
         results = retriever.retrieve(message.text, top_k=5)
         return {**state, "retrieved_chunks": tuple(results)}
+
+    def eligibility(state: OrchestrationState) -> OrchestrationState:
+        """Evaluate caller-supplied facts, or ask for them when none were supplied.
+
+        Facts come from ``eligibility_request`` only. Nothing here parses the message
+        text, because guessing a farmer's circumstances would silently produce a wrong
+        verdict about a real benefit.
+        """
+        request = _coerce_eligibility_request(state.get("eligibility_request"))
+        if request is None:
+            return {
+                **state,
+                "eligibility_decision": None,
+                "retrieved_chunks": (),
+            }
+        try:
+            decision = evaluator(request)
+        except EligibilityError:
+            decision = None
+        return {**state, "eligibility_decision": decision, "retrieved_chunks": ()}
+
+    def resolve_citations(state: OrchestrationState) -> OrchestrationState:
+        """Join resolved provenance into citations, or record that nothing resolved.
+
+        Both evidence routes converge here so citation rules live in one place and are
+        never duplicated per route. Only retrieval payloads and eligibility evidence are
+        handed to the resolver, never source text.
+
+        An empty batch with no rejections means citation resolution is not configured, so
+        the routes keep their original un-cited behaviour. Anything the resolver refused,
+        including a resolver that failed outright, is recorded as a rejection so the
+        response abstains instead of claiming to have sourced something.
+        """
+        if citation_resolver is None:
+            return {**state, "citations": CitationBatch()}
+
+        route = state.get("route")
+        try:
+            if route == Route.RETRIEVAL:
+                chunks = state.get("retrieved_chunks") or ()
+                batch = citation_resolver.resolve_payloads(
+                    result.payload for result in chunks
+                )
+            elif route == Route.ELIGIBILITY:
+                decision = state.get("eligibility_decision")
+                if decision is None:
+                    batch = CitationBatch()
+                else:
+                    batch = citation_resolver.resolve_evidence_batch(decision.evidence)
+            else:
+                batch = CitationBatch()
+        except CitationError as error:
+            batch = CitationBatch(
+                rejected=(
+                    RejectedCitation(
+                        source_id=_UNRESOLVED_SOURCE,
+                        chunk_id=None,
+                        reason=f"citation resolution failed: {error}",
+                    ),
+                )
+            )
+        return {**state, "citations": batch}
 
     def weather(state: OrchestrationState) -> OrchestrationState:
         message = state["message"]
@@ -283,12 +521,25 @@ def build_graph(
                     existing_response = _build_weather_location_request(message)
                 return {**state, "response": existing_response}
             return {**state, "response": _build_weather_response(message, weather_result)}
+        if route == Route.ELIGIBILITY:
+            response = _build_eligibility_response(
+                message,
+                state.get("eligibility_decision"),
+                state.get("citations"),
+            )
+            return {**state, "response": response}
         retrieved = state.get("retrieved_chunks") or ()
-        response = _build_retrieval_response(message, len(retrieved))
+        response = _build_retrieval_response(
+            message,
+            len(retrieved),
+            state.get("citations"),
+        )
         return {**state, "response": response}
 
     graph.add_node("route_request", route_request)
     graph.add_node("retrieve", retrieve)
+    graph.add_node("eligibility", eligibility)
+    graph.add_node("resolve_citations", resolve_citations)
     graph.add_node("weather", weather)
     graph.add_node("clarify", clarify)
     graph.add_node("finalize_response", finalize_response)
@@ -299,7 +550,9 @@ def build_graph(
         lambda state: state["route"],
         _ROUTE_NODES,
     )
-    graph.add_edge("retrieve", "finalize_response")
+    graph.add_edge("retrieve", "resolve_citations")
+    graph.add_edge("eligibility", "resolve_citations")
+    graph.add_edge("resolve_citations", "finalize_response")
     graph.add_edge("weather", "finalize_response")
     graph.add_edge("clarify", "finalize_response")
     graph.add_edge("finalize_response", END)
