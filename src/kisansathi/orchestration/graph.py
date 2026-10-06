@@ -26,11 +26,13 @@ from kisansathi.eligibility.models import (
 from kisansathi.generation.models import (
     AnswerGenerator,
     GeneratedAnswer,
+    GenerationContext,
     GenerationError,
     GroundingError,
     LLMError,
     MalformedOutputError,
 )
+from kisansathi.language import DeterministicLanguageDetector, LanguageDetector
 from kisansathi.retrieval.vector_store import SearchResult
 from kisansathi.weather.exceptions import WeatherError
 from kisansathi.weather.models import WeatherCurrent, WeatherRequest, WeatherResponse
@@ -98,6 +100,7 @@ class OrchestrationState(TypedDict):
     eligibility_request: NotRequired[EligibilityRequest | None]
     generated_answer: NotRequired[GeneratedAnswer | None]
     validated_citations: NotRequired[tuple[Citation, ...] | None]
+    detected_language: NotRequired[Language | None]
 
 
 class _RetrieverProtocol:
@@ -128,6 +131,12 @@ class _EligibilityEvaluatorProtocol(Protocol):
 class _AnswerGeneratorProtocol(Protocol):
     def generate(self, context: object) -> GeneratedAnswer:
         """Generate an answer from grounded context."""
+        ...
+
+
+class _LanguageDetectorProtocol(Protocol):
+    def detect(self, text: str) -> Language | None:
+        """Detect the language of the given text."""
         ...
 
 
@@ -394,6 +403,7 @@ def build_graph(
     citation_resolver: CitationResolver | None = None,
     eligibility_evaluator: _EligibilityEvaluatorProtocol | None = None,
     answer_generator: _AnswerGeneratorProtocol | None = None,
+    language_detector: _LanguageDetectorProtocol | None = None,
 ) -> StateGraph:
     """Build the deterministic orchestration graph.
 
@@ -404,10 +414,12 @@ def build_graph(
     is the original behaviour. Passing ``answer_generator=None`` keeps all routes using
     deterministic placeholder responses. When injected, the generator produces grounded
     answers that are then validated against the resolved citation batch.
+    Passing ``language_detector=None`` uses a deterministic script-based detector as default.
     """
 
     evaluator = evaluate if eligibility_evaluator is None else eligibility_evaluator
     generator = answer_generator
+    detector = language_detector or DeterministicLanguageDetector()
 
     graph = StateGraph(OrchestrationState)
 
@@ -420,6 +432,35 @@ def build_graph(
         if _has_eligibility_intent(message):
             return {**state, "route": Route.ELIGIBILITY}
         return {**state, "route": Route.RETRIEVAL}
+
+    def detect_language(state: OrchestrationState) -> OrchestrationState:
+        """Detect the language of the user message if not explicitly provided.
+
+        Explicit user-requested language (message.language) takes priority.
+        If not provided, run the detector on the message text.
+        On detection failure or ambiguity, fall back to None (which resolves to English later).
+        """
+        message = state["message"]
+        if message.language is not None:
+            return {**state, "detected_language": None}
+        try:
+            detected = detector.detect(message.text)
+        except AmbiguousLanguageError:
+            detected = None
+        except DetectionError:
+            detected = None
+        return {**state, "detected_language": detected}
+
+    def resolve_language(message: UserMessage, detected: Language | None) -> Language:
+        """Resolve the final language for response generation.
+
+        Priority: explicit user language > detected language > English default.
+        """
+        if message.language is not None:
+            return message.language
+        if detected is not None:
+            return detected
+        return Language.ENGLISH
 
     def retrieve(state: OrchestrationState) -> OrchestrationState:
         message = state["message"]
@@ -500,6 +541,11 @@ def build_graph(
 
         from kisansathi.generation.models import GenerationContext
 
+        # Resolve the language for this request
+        resolved_language = resolve_language(
+            state["message"], state.get("detected_language")
+        )
+
         context = GenerationContext(
             message=state["message"],
             citations=state.get("citations") or CitationBatch(),
@@ -509,6 +555,14 @@ def build_graph(
 
         try:
             answer = generator.generate(context)
+            # Override the answer's language with the resolved language
+            if answer is not None:
+                answer = GeneratedAnswer(
+                    text=answer.text,
+                    citation_ids=answer.citation_ids,
+                    status=answer.status,
+                    language=resolved_language,
+                )
         except LLMError:
             # Infrastructure failure (network, timeout, provider error) -> ABSTAINED
             return {
@@ -517,7 +571,7 @@ def build_graph(
                     text="I could not generate an answer due to a service error. Please try again later.",
                     citation_ids=(),
                     status=ResponseStatus.ABSTAINED,
-                    language=state["message"].language or Language.ENGLISH,
+                    language=resolved_language,
                 ),
             }
         except (MalformedOutputError, GroundingError):
@@ -528,7 +582,7 @@ def build_graph(
                     text="I could not produce a reliable answer from the available sources.",
                     citation_ids=(),
                     status=ResponseStatus.NEEDS_CLARIFICATION,
-                    language=state["message"].language or Language.ENGLISH,
+                    language=resolved_language,
                 ),
             }
         except GenerationError:
@@ -539,7 +593,7 @@ def build_graph(
                     text="I could not produce a reliable answer from the available sources.",
                     citation_ids=(),
                     status=ResponseStatus.NEEDS_CLARIFICATION,
-                    language=state["message"].language or Language.ENGLISH,
+                    language=resolved_language,
                 ),
             }
 
@@ -576,6 +630,7 @@ def build_graph(
 
     def weather(state: OrchestrationState) -> OrchestrationState:
         message = state["message"]
+        resolved_language = resolve_language(message, state.get("detected_language"))
         coordinates = _resolve_coordinates(message)
         if coordinates is None:
             return {
@@ -641,10 +696,18 @@ def build_graph(
                     ),
                 }
             # Fallback to deterministic response (uses citations from resolver)
+            resolved_language = resolve_language(message, state.get("detected_language"))
             response = _build_eligibility_response(
                 message,
                 state.get("eligibility_decision"),
                 state.get("citations"),
+            )
+            # Override language in deterministic response
+            response = AssistantResponse(
+                text=response.text,
+                language=resolved_language,
+                status=response.status,
+                citations=response.citations,
             )
             return {**state, "response": response}
         # Retrieval route
@@ -665,15 +728,24 @@ def build_graph(
                 ),
             }
         # No generator configured: use the raw citation batch for the placeholder
+        resolved_language = resolve_language(message, state.get("detected_language"))
         retrieved = state.get("retrieved_chunks") or ()
         response = _build_retrieval_response(
             message,
             len(retrieved),
             batch if batch else CitationBatch(),
         )
+        # Override language in deterministic response
+        response = AssistantResponse(
+            text=response.text,
+            language=resolved_language,
+            status=response.status,
+            citations=response.citations,
+        )
         return {**state, "response": response}
 
     graph.add_node("route_request", route_request)
+    graph.add_node("detect_language", detect_language)
     graph.add_node("retrieve", retrieve)
     graph.add_node("eligibility", eligibility)
     graph.add_node("resolve_citations", resolve_citations)
@@ -689,13 +761,18 @@ def build_graph(
         lambda state: state["route"],
         _ROUTE_NODES,
     )
-    # Retrieval and eligibility paths go through generation
+    # Language detection runs after routing, before evidence gathering
+    graph.add_edge("detect_language", "retrieve")
+    graph.add_edge("detect_language", "eligibility")
+    graph.add_edge("detect_language", "weather")
+    graph.add_edge("detect_language", "clarify")
+    # Retrieval and eligibility paths go through citation resolution and generation
     graph.add_edge("retrieve", "resolve_citations")
     graph.add_edge("eligibility", "resolve_citations")
     graph.add_edge("resolve_citations", "generate_answer")
     graph.add_edge("generate_answer", "validate_and_attach_citations")
     graph.add_edge("validate_and_attach_citations", "finalize_response")
-    # Weather and clarify paths bypass generation entirely (no document evidence)
+    # Weather and clarify paths bypass citation resolution and generation (no document evidence)
     graph.add_edge("weather", "finalize_response")
     graph.add_edge("clarify", "finalize_response")
     graph.add_edge("finalize_response", END)

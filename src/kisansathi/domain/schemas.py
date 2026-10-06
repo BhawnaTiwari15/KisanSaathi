@@ -12,6 +12,8 @@ _CHUNK_ID = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*):([0-9a-f]{24})$")
 class Language(StrEnum):
     ENGLISH = "en"
     HINDI = "hi"
+    KANNADA = "kn"
+    TELUGU = "te"
 
 
 class ResponseStatus(StrEnum):
@@ -24,6 +26,7 @@ class ResponseStatus(StrEnum):
 class UserMessage:
     text: str
     language: Language | None = None
+    detected_language: Language | None = None
     latitude: float | None = None
     longitude: float | None = None
 
