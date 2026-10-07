@@ -8,6 +8,7 @@ from kisansathi.generation.fake import FakeLLMClient, FakeAnswerGenerator
 from kisansathi.generation.generator import DefaultAnswerGenerator
 from kisansathi.generation.models import GenerationContext, LLMError, MalformedOutputError, GroundingError
 from kisansathi.generation.prompts import parse_generated_answer
+from kisansathi.vision.models import VisionResult
 from kisansathi.weather.models import WeatherCurrent, WeatherResponse
 
 
@@ -28,6 +29,7 @@ class TestDefaultAnswerGenerator(unittest.TestCase):
             citations=self.batch,
             eligibility_decision=None,
             weather=None,
+            vision_result=None,
         )
 
     def test_success_with_valid_llm_response(self) -> None:
@@ -98,6 +100,7 @@ class TestDefaultAnswerGenerator(unittest.TestCase):
             citations=self.batch,
             eligibility_decision=None,
             weather=None,
+            vision_result=None,
         )
         generator.generate(context)
 
@@ -149,6 +152,7 @@ class TestDefaultAnswerGenerator(unittest.TestCase):
             citations=self.batch,
             eligibility_decision=decision,
             weather=None,
+            vision_result=None,
         )
         generator.generate(context)
 
@@ -181,6 +185,7 @@ class TestDefaultAnswerGenerator(unittest.TestCase):
             citations=self.batch,
             eligibility_decision=None,
             weather=weather,
+            vision_result=None,
         )
         generator.generate(context)
 

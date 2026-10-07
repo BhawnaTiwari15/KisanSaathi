@@ -42,6 +42,25 @@ from kisansathi.voice import (
     TranscriptionError,
     TranscriptionResult,
 )
+from kisansathi.voice import (
+    EmptyTranscriptError,
+    InvalidAudioError,
+    SpeechToText,
+    SpeechToTextError,
+    TranscriptionError,
+    TranscriptionResult,
+)
+from kisansathi.vision import (
+    ImageValidationError,
+    AnalyzerUnavailableError,
+    AnalyzerTimeoutError,
+    UnsupportedFormatError,
+    ImageTooLargeError,
+    LowConfidenceError,
+    VisionAnalyzer,
+    VisionResult,
+    VisionStatus,
+)
 from kisansathi.weather.exceptions import WeatherError
 from kisansathi.weather.models import WeatherCurrent, WeatherRequest, WeatherResponse
 
@@ -113,6 +132,10 @@ class OrchestrationState(TypedDict):
     detected_language: NotRequired[Language | None]
     audio_data: NotRequired[bytes | None]
     audio_content_type: NotRequired[str | None]
+    image_data: NotRequired[bytes | None]
+    image_content_type: NotRequired[str | None]
+    image_filename: NotRequired[str | None]
+    vision_result: NotRequired[VisionResult | None]
 
 
 class _RetrieverProtocol:
@@ -155,6 +178,20 @@ class _LanguageDetectorProtocol(Protocol):
 class _SpeechToTextProtocol(Protocol):
     def transcribe(self, audio_data: bytes, *, content_type: str | None = None) -> TranscriptionResult:
         """Transcribe audio data to text."""
+        ...
+
+
+class _VisionAnalyzerProtocol(Protocol):
+    def analyze(
+        self,
+        image_data: bytes,
+        *,
+        content_type: str | None = None,
+        filename: str | None = None,
+        max_observations: int = 5,
+        confidence_threshold: float = 0.3,
+    ) -> VisionResult:
+        """Analyze an image and return structured observations."""
         ...
 
 
@@ -251,6 +288,7 @@ def _build_retrieval_response(
     message: UserMessage,
     chunk_count: int,
     batch: CitationBatch | None = None,
+    vision_result: VisionResult | None = None,
 ) -> AssistantResponse:
     """Create a response noting that retrieval occurred but generation is not implemented.
 
@@ -261,13 +299,24 @@ def _build_retrieval_response(
     """
     language = message.language or Language.ENGLISH
     citations: tuple[Citation, ...] = batch.citations if batch is not None else ()
+    
+    # Add vision context to response if available
+    vision_text = ""
+    if vision_result and vision_result.status == VisionStatus.SUCCESS and vision_result.observations:
+        obs_summary = ", ".join(f"{obs.label} ({obs.category})" for obs in vision_result.observations[:3])
+        vision_text = f"\n\nVisual context: {obs_summary}. (Uncertain - see citations)"
+    elif vision_result and vision_result.status != VisionStatus.SUCCESS:
+        vision_text = f"\n\nVisual analysis: {vision_result.status.value.replace('_', ' ').title()}."
+    else:
+        vision_text = ""
+    
     if chunk_count > 0 and not citations and batch is not None and batch.rejected:
         text = (
             "I could not verify the sources behind these excerpts, "
             "so I am not citing them."
         )
         return AssistantResponse(
-            text=text,
+            text=text + vision_text,
             language=language,
             status=ResponseStatus.ABSTAINED,
             citations=(),
@@ -277,7 +326,7 @@ def _build_retrieval_response(
         "but answer generation has not yet been implemented."
     )
     return AssistantResponse(
-        text=text,
+        text=text + vision_text,
         language=language,
         status=ResponseStatus.ANSWERED,
         citations=citations,
@@ -288,6 +337,7 @@ def _build_eligibility_response(
     message: UserMessage,
     decision: EligibilityDecision | None,
     batch: CitationBatch | None,
+    vision_result: VisionResult | None = None,
 ) -> AssistantResponse:
     """Render an eligibility outcome and its citations, refusing unciteable verdicts.
 
@@ -298,6 +348,16 @@ def _build_eligibility_response(
     """
     language = message.language or Language.ENGLISH
     citations: tuple[Citation, ...] = batch.citations if batch is not None else ()
+    
+    # Add vision context to response if available
+    vision_text = ""
+    if vision_result and vision_result.status == VisionStatus.SUCCESS and vision_result.observations:
+        obs_summary = ", ".join(f"{obs.label} ({obs.category})" for obs in vision_result.observations[:3])
+        vision_text = f"\n\nVisual context: {obs_summary}. (Uncertain - see citations)"
+    elif vision_result and vision_result.status != VisionStatus.SUCCESS:
+        vision_text = f"\n\nVisual analysis: {vision_result.status.value.replace('_', ' ').title()}."
+    else:
+        vision_text = ""
 
     if decision is None:
         return AssistantResponse(
@@ -305,7 +365,7 @@ def _build_eligibility_response(
                 "I cannot determine eligibility without the required facts. "
                 "Please provide the following so I can check them against the official "
                 f"guidelines: {', '.join(FACT_NAMES)}."
-            ),
+            ) + vision_text,
             language=language,
             status=ResponseStatus.NEEDS_CLARIFICATION,
             citations=(),
@@ -313,7 +373,7 @@ def _build_eligibility_response(
 
     if decision.status is EligibilityStatus.UNSUPPORTED_SCHEME:
         return AssistantResponse(
-            text=decision.summary,
+            text=decision.summary + vision_text,
             language=language,
             status=ResponseStatus.ABSTAINED,
             citations=(),
@@ -324,7 +384,7 @@ def _build_eligibility_response(
             text=(
                 f"{decision.summary} "
                 f"Please provide the following: {', '.join(decision.missing_facts)}."
-            ),
+            ) + vision_text,
             language=language,
             status=ResponseStatus.NEEDS_CLARIFICATION,
             citations=(),
@@ -335,7 +395,7 @@ def _build_eligibility_response(
             text=(
                 "I reached a determination, but I could not verify the official documents "
                 "behind it, so I am withholding it rather than stating it without a source."
-            ),
+            ) + vision_text,
             language=language,
             status=ResponseStatus.ABSTAINED,
             citations=(),
@@ -345,7 +405,7 @@ def _build_eligibility_response(
         text=(
             f"{decision.summary} "
             "This determination is based only on the official documents cited below."
-        ),
+        ) + vision_text,
         language=language,
         status=ResponseStatus.ANSWERED,
         citations=citations,
@@ -423,6 +483,7 @@ def build_graph(
     answer_generator: _AnswerGeneratorProtocol | None = None,
     language_detector: _LanguageDetectorProtocol | None = None,
     speech_to_text: _SpeechToTextProtocol | None = None,
+    vision_analyzer: _VisionAnalyzerProtocol | None = None,
 ) -> StateGraph:
     """Build the deterministic orchestration graph.
 
@@ -436,12 +497,15 @@ def build_graph(
     Passing ``language_detector=None`` uses a deterministic script-based detector as default.
     Passing ``speech_to_text=None`` keeps the text-only path unchanged; when injected,
     audio input is transcribed before routing.
+    Passing ``vision_analyzer=None`` keeps the text-only path unchanged; when injected,
+    image input is analyzed before routing.
     """
 
     evaluator = evaluate if eligibility_evaluator is None else eligibility_evaluator
     generator = answer_generator
     detector = language_detector or DeterministicLanguageDetector()
     stt = speech_to_text
+    vision = vision_analyzer
 
     graph = StateGraph(OrchestrationState)
 
@@ -570,15 +634,146 @@ def build_graph(
                 "audio_content_type": None,
             }
 
+    def vision_node(state: OrchestrationState) -> OrchestrationState:
+        """Analyze image if provided, otherwise pass through unchanged.
+
+        If no image input is present, passes through unchanged.
+        On analysis failure, returns a fallback response with appropriate status.
+        """
+        if vision is None:
+            return state
+
+        image_data = state.get("image_data")
+        content_type = state.get("image_content_type")
+        filename = state.get("image_filename")
+
+        if not image_data:
+            return state
+
+        try:
+            # Validate image input
+            from kisansathi.vision.image import validate_image_input
+            validated = validate_image_input(image_data, content_type or "image/jpeg")
+
+            # Analyze
+            result = vision.analyze(
+                image_data=validated.data,
+                content_type=validated.content_type,
+                filename=validated.filename,
+                max_observations=5,
+                confidence_threshold=0.3,
+            )
+
+            # Validate vision result
+            if result.status == VisionStatus.SUCCESS and result.observations:
+                # Create UserMessage with transcribed text (empty for image-only)
+                # Priority: explicit user language > Whisper detected > detector > English
+                user_language = state["message"].language or result.language or Language.ENGLISH
+                message = UserMessage(
+                    text=state["message"].text or "",
+                    language=user_language,
+                    latitude=state["message"].latitude,
+                    longitude=state["message"].longitude,
+                )
+                return {
+                    **state,
+                    "message": message,
+                    "vision_result": result,
+                    "image_data": None,
+                    "image_content_type": None,
+                    "image_filename": None,
+                }
+            else:
+                # Vision analysis failed or no useful information
+                return {
+                    **state,
+                    "vision_result": result,
+                    "image_data": None,
+                    "image_content_type": None,
+                    "image_filename": None,
+                }
+
+        except ImageValidationError as e:
+            # Invalid image format -> ABSTAINED
+            lang = state["message"].language or Language.ENGLISH
+            return {
+                **state,
+                "response": AssistantResponse(
+                    text="I could not process the image. Please check the format and try again.",
+                    language=lang,
+                    status=ResponseStatus.ABSTAINED,
+                    citations=(),
+                ),
+                "image_data": None,
+                "image_content_type": None,
+                "image_filename": None,
+            }
+        except (UnsupportedFormatError, ImageTooLargeError) as e:
+            # Unsupported format or oversized image -> ABSTAINED
+            lang = state["message"].language or Language.ENGLISH
+            return {
+                **state,
+                "response": AssistantResponse(
+                    text="I could not process the image. Please check the format and try again.",
+                    language=lang,
+                    status=ResponseStatus.ABSTAINED,
+                    citations=(),
+                ),
+                "image_data": None,
+                "image_content_type": None,
+                "image_filename": None,
+            }
+        except (AnalyzerUnavailableError, AnalyzerTimeoutError) as e:
+            # Analyzer unavailable or timeout -> ABSTAINED
+            lang = state["message"].language or Language.ENGLISH
+            return {
+                **state,
+                "response": AssistantResponse(
+                    text="Vision analysis service is unavailable. Please try again later.",
+                    language=lang,
+                    status=ResponseStatus.ABSTAINED,
+                    citations=(),
+                ),
+                "image_data": None,
+                "image_content_type": None,
+                "image_filename": None,
+            }
+        except Exception as e:
+            # Other vision errors -> ABSTAINED
+            lang = state["message"].language or Language.ENGLISH
+            return {
+                **state,
+                "response": AssistantResponse(
+                    text="Vision analysis service is unavailable. Please try again later.",
+                    language=lang,
+                    status=ResponseStatus.ABSTAINED,
+                    citations=(),
+                ),
+                "image_data": None,
+                "image_content_type": None,
+                "image_filename": None,
+            }
+
     def route_request(state: OrchestrationState) -> OrchestrationState:
         # If a terminal response (ABSTAINED/NEEDS_CLARIFICATION) is already set by a previous node
-        # (e.g., speech_to_text failure), preserve it and skip routing to go directly to finalize.
+        # (e.g., speech_to_text or vision failure), preserve it and skip routing to go directly to finalize.
         existing_response = state.get("response")
         if existing_response is not None and existing_response.status in (
             ResponseStatus.ABSTAINED,
             ResponseStatus.NEEDS_CLARIFICATION,
         ):
             return {**state, "route": Route.FINALIZE}
+
+        message = state["message"]
+        
+        # Vision can provide routing hints (e.g., disease/pest -> eligibility, crop -> retrieval)
+        vision_result = state.get("vision_result")
+        if vision_result and vision_result.status == VisionStatus.SUCCESS and vision_result.observations:
+            categories = {obs.category for obs in vision_result.observations}
+            if "disease" in categories or "pest" in categories:
+                return {**state, "route": Route.ELIGIBILITY}
+            if "crop" in categories:
+                return {**state, "route": Route.RETRIEVAL}
 
         message = state["message"]
         if _is_underspecified(message):
@@ -620,7 +815,26 @@ def build_graph(
 
     def retrieve(state: OrchestrationState) -> OrchestrationState:
         message = state["message"]
-        results = retriever.retrieve(message.text, top_k=5)
+        
+        # Build query with vision context for better retrieval
+        query = message.text
+        vision_result = state.get("vision_result")
+        if vision_result and vision_result.status == VisionStatus.SUCCESS and vision_result.observations:
+            # Extract relevant keywords from vision observations
+            vision_keywords = []
+            for obs in vision_result.observations:
+                if obs.confidence >= 0.5:
+                    vision_keywords.append(obs.label)
+                    if obs.category == "disease":
+                        vision_keywords.append(f"{obs.label} symptoms")
+                    elif obs.category == "pest":
+                        vision_keywords.append(f"{obs.label} damage")
+                    elif obs.category == "crop":
+                        vision_keywords.append(f"{obs.label} farming")
+            if vision_keywords:
+                query = f"{message.text} {' '.join(vision_keywords[:3])}"
+        
+        results = retriever.retrieve(query, top_k=5)
         return {**state, "retrieved_chunks": tuple(results)}
 
     def eligibility(state: OrchestrationState) -> OrchestrationState:
@@ -707,6 +921,7 @@ def build_graph(
             citations=state.get("citations") or CitationBatch(),
             eligibility_decision=state.get("eligibility_decision"),
             weather=state.get("weather"),
+            vision_result=state.get("vision_result"),
         )
 
         try:
@@ -863,6 +1078,7 @@ def build_graph(
                 message,
                 state.get("eligibility_decision"),
                 state.get("citations"),
+                state.get("vision_result"),
             )
             # Override language in deterministic response
             response = AssistantResponse(
@@ -872,30 +1088,48 @@ def build_graph(
                 citations=response.citations,
             )
             return {**state, "response": response}
-        # Retrieval route
-        answer = state.get("generated_answer")
-        validated = state.get("validated_citations") or ()
-        batch = state.get("citations")
+        if route == Route.RETRIEVAL:
+            # Retrieval route
+            answer = state.get("generated_answer")
+            validated = state.get("validated_citations") or ()
+            batch = state.get("citations")
 
-        # If a generator was configured, generated_answer will be set (even on fallback).
-        # If no generator was configured, generated_answer is None and we use the raw batch.
-        if answer is not None:
-            return {
-                **state,
-                "response": AssistantResponse(
-                    text=answer.text,
-                    language=answer.language,
-                    status=answer.status,
-                    citations=validated,
-                ),
-            }
-        # No generator configured: use the raw citation batch for the placeholder
+            # If a generator was configured, generated_answer will be set (even on fallback).
+            # If no generator was configured, generated_answer is None and we use the raw batch.
+            if answer is not None:
+                return {
+                    **state,
+                    "response": AssistantResponse(
+                        text=answer.text,
+                        language=answer.language,
+                        status=answer.status,
+                        citations=validated,
+                    ),
+                }
+            # No generator configured: use the raw citation batch for the placeholder
+            resolved_language = resolve_language(message, state.get("detected_language"))
+            retrieved = state.get("retrieved_chunks") or ()
+            response = _build_retrieval_response(
+                message,
+                len(retrieved),
+                batch if batch else CitationBatch(),
+                state.get("vision_result"),
+            )
+            # Override language in deterministic response
+            response = AssistantResponse(
+                text=response.text,
+                language=resolved_language,
+                status=response.status,
+                citations=response.citations,
+            )
+            return {**state, "response": response}
+        # Fallback for any other route
         resolved_language = resolve_language(message, state.get("detected_language"))
-        retrieved = state.get("retrieved_chunks") or ()
-        response = _build_retrieval_response(
+        response = _build_eligibility_response(
             message,
-            len(retrieved),
-            batch if batch else CitationBatch(),
+            state.get("eligibility_decision"),
+            state.get("citations"),
+            state.get("vision_result"),
         )
         # Override language in deterministic response
         response = AssistantResponse(
@@ -907,6 +1141,7 @@ def build_graph(
         return {**state, "response": response}
 
     graph.add_node("speech_to_text", speech_to_text_node)
+    graph.add_node("vision", vision_node)
     graph.add_node("route_request", route_request)
     graph.add_node("detect_language", detect_language)
     graph.add_node("retrieve", retrieve)
@@ -919,7 +1154,8 @@ def build_graph(
     graph.add_node("finalize_response", finalize_response)
 
     graph.add_edge("__start__", "speech_to_text")
-    graph.add_edge("speech_to_text", "route_request")
+    graph.add_edge("speech_to_text", "vision")
+    graph.add_edge("vision", "route_request")
     # route_request determines the route; if a terminal response is already set, go directly to finalize
     # For retrieval/eligibility, run language detection first; weather/clarify/finalize bypass it.
     graph.add_conditional_edges(

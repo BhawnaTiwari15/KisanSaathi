@@ -9,6 +9,7 @@ from kisansathi.domain.schemas import Language, ResponseStatus, UserMessage
 from kisansathi.eligibility.models import EligibilityDecision
 from kisansathi.generation.models import GeneratedAnswer, GroundingError, MalformedOutputError
 from kisansathi.weather.models import WeatherResponse
+from kisansathi.vision.models import VisionResult, VisionStatus
 
 # Maximum characters of evidence to include in the prompt (protects against context
 # overflow and limits the attack surface for prompt injection via retrieved text).
@@ -89,6 +90,28 @@ def _format_weather(weather: WeatherResponse | None) -> str:
     return f"\nWEATHER: {weather_str} (at {weather.latitude}, {weather.longitude})"
 
 
+def _format_vision(vision: VisionResult | None) -> str:
+    if vision is None:
+        return ""
+    if vision.status != VisionStatus.SUCCESS:
+        return f"\nVISION: {vision.status.value.replace('_', ' ').title()}."
+    
+    if not vision.observations:
+        return "\nVISION: No usable visual information."
+    
+    lines = ["\nVISUAL OBSERVATIONS:"]
+    for i, obs in enumerate(vision.observations, 1):
+        conf_pct = int(obs.confidence * 100)
+        lines.append(
+            f"[{i}] {obs.label} ({obs.category}, {conf_pct}% confidence): {obs.description}"
+        )
+    lines.append(
+        f"\nNOTE: Visual observations are uncertain (overall confidence: {vision.confidence_overall:.0%}). "
+        "Do not treat as definitive diagnosis. Use cautious language: 'appears to be', 'consistent with', 'suggests'."
+    )
+    return "\n".join(lines)
+
+
 def build_system_prompt(language: Language) -> str:
     """Return the system prompt for the requested language."""
     lang_name = {
@@ -114,11 +137,13 @@ def build_user_prompt(
     citations: CitationBatch,
     eligibility_decision: EligibilityDecision | None,
     weather: WeatherResponse | None,
+    vision_result: VisionResult | None = None,
 ) -> str:
     """Assemble the grounded context into a user prompt."""
     evidence = _format_citations(citations)
     eligibility = _format_eligibility(eligibility_decision)
     weather_str = _format_weather(weather)
+    vision_str = _format_vision(vision_result)
 
     # Truncate if exceeding max context
     full_prompt = (
@@ -126,6 +151,7 @@ def build_user_prompt(
         f"EVIDENCE:\n{evidence}"
         f"{eligibility}"
         f"{weather_str}"
+        f"{vision_str}"
     )
 
     if len(full_prompt) > _MAX_CONTEXT_CHARS:
@@ -137,6 +163,7 @@ def build_user_prompt(
             f"EVIDENCE:\n{evidence}"
             f"{eligibility}"
             f"{weather_str}"
+            f"{vision_str}"
         )
 
     return full_prompt

@@ -100,14 +100,17 @@ def make_fake_generation_context(
     citations: CitationBatch | None = None,
     eligibility_decision: EligibilityDecision | None = None,
     weather: WeatherResponse | None = None,
+    vision_result: "VisionResult | None" = None,
     language: Language = Language.ENGLISH,
 ) -> GenerationContext:
     """Helper to create a GenerationContext for tests."""
     from kisansathi.citations.models import CitationBatch
+    from kisansathi.vision.models import VisionResult
 
     return GenerationContext(
         message=UserMessage(text=message_text, language=language),
         citations=citations or CitationBatch(),
         eligibility_decision=eligibility_decision,
         weather=weather,
+        vision_result=vision_result,
     )

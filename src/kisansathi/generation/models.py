@@ -11,6 +11,7 @@ from kisansathi.citations.models import CitationBatch
 from kisansathi.domain.schemas import Language, ResponseStatus, UserMessage
 from kisansathi.eligibility.models import EligibilityDecision
 from kisansathi.weather.models import WeatherResponse
+from kisansathi.vision.models import VisionResult
 
 
 class GenerationError(Exception):
@@ -37,6 +38,7 @@ class GenerationContext:
     citations: CitationBatch
     eligibility_decision: EligibilityDecision | None
     weather: WeatherResponse | None
+    vision_result: VisionResult | None
 
 
 @dataclass(frozen=True, slots=True)
