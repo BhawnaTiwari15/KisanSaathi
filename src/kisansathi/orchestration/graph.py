@@ -13,6 +13,7 @@ from kisansathi.domain.schemas import (
     Citation,
     Language,
     ResponseStatus,
+    Route,
     UserMessage,
 )
 from kisansathi.eligibility.evaluator import evaluate
@@ -32,6 +33,7 @@ from kisansathi.generation.models import (
     LLMError,
     MalformedOutputError,
 )
+from kisansathi.guardrails import GuardrailCategory, apply_final_guardrails
 from kisansathi.language import DeterministicLanguageDetector, LanguageDetector
 from kisansathi.retrieval.vector_store import SearchResult
 from kisansathi.voice import (
@@ -63,16 +65,6 @@ from kisansathi.vision import (
 )
 from kisansathi.weather.exceptions import WeatherError
 from kisansathi.weather.models import WeatherCurrent, WeatherRequest, WeatherResponse
-
-
-class Route(StrEnum):
-    """The routes the request may take out of ``route_request``."""
-
-    RETRIEVAL = "retrieval"
-    ELIGIBILITY = "eligibility"
-    WEATHER = "weather"
-    CLARIFY = "clarify"
-    FINALIZE = "finalize"
 
 
 _ROUTE_NODES: dict[str, str] = {
@@ -1037,108 +1029,24 @@ def build_graph(
         return {**state, "response": response, "retrieved_chunks": ()}
 
     def finalize_response(state: OrchestrationState) -> OrchestrationState:
-        message = state["message"]
-        route = state.get("route")
-        if route == Route.FINALIZE:
-            # Terminal response already set by error handler; pass it through
-            existing_response = state.get("response")
-            if existing_response is None:
-                existing_response = _build_clarification_response(message)
-            return {**state, "response": existing_response}
-        if route == Route.CLARIFY:
-            existing_response = state.get("response")
-            if existing_response is None:
-                existing_response = _build_clarification_response(message)
-            return {**state, "response": existing_response}
-        if route == Route.WEATHER:
-            weather_result = state.get("weather")
-            if weather_result is None:
-                existing_response = state.get("response")
-                if existing_response is None:
-                    existing_response = _build_weather_location_request(message)
-                return {**state, "response": existing_response}
-            return {**state, "response": _build_weather_response(message, weather_result)}
-        if route == Route.ELIGIBILITY:
-            # Use generated answer if available, otherwise fall back to deterministic response
-            answer = state.get("generated_answer")
-            validated = state.get("validated_citations") or ()
-            if answer is not None:
-                return {
-                    **state,
-                    "response": AssistantResponse(
-                        text=answer.text,
-                        language=answer.language,
-                        status=answer.status,
-                        citations=validated,
-                    ),
-                }
-            # Fallback to deterministic response (uses citations from resolver)
-            resolved_language = resolve_language(message, state.get("detected_language"))
-            response = _build_eligibility_response(
-                message,
-                state.get("eligibility_decision"),
-                state.get("citations"),
-                state.get("vision_result"),
-            )
-            # Override language in deterministic response
-            response = AssistantResponse(
-                text=response.text,
-                language=resolved_language,
-                status=response.status,
-                citations=response.citations,
-            )
-            return {**state, "response": response}
-        if route == Route.RETRIEVAL:
-            # Retrieval route
-            answer = state.get("generated_answer")
-            validated = state.get("validated_citations") or ()
-            batch = state.get("citations")
-
-            # If a generator was configured, generated_answer will be set (even on fallback).
-            # If no generator was configured, generated_answer is None and we use the raw batch.
-            if answer is not None:
-                return {
-                    **state,
-                    "response": AssistantResponse(
-                        text=answer.text,
-                        language=answer.language,
-                        status=answer.status,
-                        citations=validated,
-                    ),
-                }
-            # No generator configured: use the raw citation batch for the placeholder
-            resolved_language = resolve_language(message, state.get("detected_language"))
-            retrieved = state.get("retrieved_chunks") or ()
-            response = _build_retrieval_response(
-                message,
-                len(retrieved),
-                batch if batch else CitationBatch(),
-                state.get("vision_result"),
-            )
-            # Override language in deterministic response
-            response = AssistantResponse(
-                text=response.text,
-                language=resolved_language,
-                status=response.status,
-                citations=response.citations,
-            )
-            return {**state, "response": response}
-        # Fallback for any other route
-        resolved_language = resolve_language(message, state.get("detected_language"))
-        response = _build_eligibility_response(
-            message,
-            state.get("eligibility_decision"),
-            state.get("citations"),
-            state.get("vision_result"),
-        )
-        # Override language in deterministic response
-        response = AssistantResponse(
-            text=response.text,
-            language=resolved_language,
-            status=response.status,
-            citations=response.citations,
-        )
-        return {**state, "response": response}
+        """Pass-through: the response is already finalized by apply_guardrails."""
+        # The response should already be set by apply_guardrails.
+        # This node exists only as a clear termination point in the graph.
+        existing_response = state.get("response")
+        if existing_response is None:
+            # Should not happen if guardrails ran, but fail closed
+            message = state["message"]
+            language = message.language or Language.ENGLISH
+            return {
+                **state,
+                "response": AssistantResponse(
+                    text="I could not generate a response. Please try again.",
+                    language=language,
+                    status=ResponseStatus.ABSTAINED,
+                    citations=(),
+                ),
+            }
+        return state
 
     graph.add_node("speech_to_text", speech_to_text_node)
     graph.add_node("vision", vision_node)
@@ -1149,6 +1057,7 @@ def build_graph(
     graph.add_node("resolve_citations", resolve_citations)
     graph.add_node("generate_answer", generate_answer)
     graph.add_node("validate_and_attach_citations", validate_and_attach_citations)
+    graph.add_node("apply_guardrails", lambda state: apply_final_guardrails(state, state.get("route")))
     graph.add_node("weather", weather)
     graph.add_node("clarify", clarify)
     graph.add_node("finalize_response", finalize_response)
@@ -1180,10 +1089,11 @@ def build_graph(
     graph.add_edge("eligibility", "resolve_citations")
     graph.add_edge("resolve_citations", "generate_answer")
     graph.add_edge("generate_answer", "validate_and_attach_citations")
-    graph.add_edge("validate_and_attach_citations", "finalize_response")
-    # Weather and clarify paths bypass citation resolution and generation (no document evidence)
-    graph.add_edge("weather", "finalize_response")
-    graph.add_edge("clarify", "finalize_response")
+    graph.add_edge("validate_and_attach_citations", "apply_guardrails")
+    # Weather and clarify paths also go through guardrails for consistent handling
+    graph.add_edge("weather", "apply_guardrails")
+    graph.add_edge("clarify", "apply_guardrails")
+    graph.add_edge("apply_guardrails", "finalize_response")
     graph.add_edge("finalize_response", END)
 
     return graph

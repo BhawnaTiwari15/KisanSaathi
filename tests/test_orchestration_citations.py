@@ -578,7 +578,7 @@ class PreservedBehaviourTests(unittest.TestCase):
             result["response"].text.lower(),
         )
 
-    def test_empty_retrieval_stays_answered_without_citations(self) -> None:
+    def test_empty_retrieval_abstains_when_no_chunks(self) -> None:
         graph = build_graph(
             FakeRetriever(),
             citation_resolver=RecordingResolver(build_registry()),
@@ -586,7 +586,7 @@ class PreservedBehaviourTests(unittest.TestCase):
 
         result = graph.invoke(make_state(message(RETRIEVAL_QUESTION)))
 
-        self.assertEqual(result["response"].status, ResponseStatus.ANSWERED)
+        self.assertEqual(result["response"].status, ResponseStatus.ABSTAINED)
         self.assertEqual(result["response"].citations, ())
 
     def test_document_questions_still_reach_retrieval(self) -> None:

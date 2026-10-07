@@ -22,6 +22,16 @@ class ResponseStatus(StrEnum):
     ABSTAINED = "abstained"
 
 
+class Route(StrEnum):
+    """The routes the request may take out of routing."""
+
+    RETRIEVAL = "retrieval"
+    ELIGIBILITY = "eligibility"
+    WEATHER = "weather"
+    CLARIFY = "clarify"
+    FINALIZE = "finalize"
+
+
 @dataclass(frozen=True, slots=True)
 class UserMessage:
     text: str
