@@ -1,0 +1,356 @@
+"""Versioned evaluation dataset schemas."""
+
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import StrEnum
+from pathlib import Path
+from typing import Any
+import json
+
+
+class Language(StrEnum):
+    ENGLISH = "en"
+    HINDI = "hi"
+    KANNADA = "kn"
+    TELUGU = "te"
+
+
+class RetrievalCategory(StrEnum):
+    ELIGIBILITY = "eligibility"
+    SCHEME_DETAILS = "scheme_details"
+    WEATHER = "weather"
+    GENERAL = "general"
+    DOCUMENT_LOOKUP = "document_lookup"
+
+
+class Difficulty(StrEnum):
+    EASY = "easy"
+    MEDIUM = "medium"
+    HARD = "hard"
+
+
+class AnswerStatus(StrEnum):
+    ANSWERED = "answered"
+    NEEDS_CLARIFICATION = "needs_clarification"
+    ABSTAINED = "abstained"
+
+
+class RefusalType(StrEnum):
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+    UNSUPPORTED_SCHEME = "unsupported_scheme"
+    AMBIGUOUS = "ambiguous"
+    UNSAFE = "unsafe"
+    OUT_OF_SCOPE = "out_of_scope"
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalExample:
+    """A single retrieval evaluation example."""
+
+    id: str
+    language: Language
+    query: str
+    expected_chunk_ids: tuple[str, ...]
+    expected_source_ids: tuple[str, ...] = ()
+    category: RetrievalCategory | None = None
+    difficulty: Difficulty | None = None
+    notes: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.id.strip():
+            raise ValueError("id must not be empty")
+        if not self.query.strip():
+            raise ValueError("query must not be empty")
+        if not self.expected_chunk_ids:
+            raise ValueError("expected_chunk_ids must not be empty")
+        if any(not cid.strip() for cid in self.expected_chunk_ids):
+            raise ValueError("expected_chunk_ids must not contain empty strings")
+        if len(set(self.expected_chunk_ids)) != len(self.expected_chunk_ids):
+            raise ValueError("expected_chunk_ids must not contain duplicates")
+
+
+@dataclass(frozen=True, slots=True)
+class RetrievalDataset:
+    """Versioned retrieval evaluation dataset."""
+
+    evaluation_set_version: str
+    corpus_version: str
+    examples: tuple[RetrievalExample, ...]
+
+    def __post_init__(self) -> None:
+        if not self.evaluation_set_version.strip():
+            raise ValueError("evaluation_set_version must not be empty")
+        if not self.corpus_version.strip():
+            raise ValueError("corpus_version must not be empty")
+        # Allow empty examples for unavailable datasets
+        ids = [ex.id for ex in self.examples]
+        if len(set(ids)) != len(ids):
+            raise ValueError("example ids must be unique")
+
+    @property
+    def language(self) -> Language:
+        """Return the language of this dataset (assumes single-language dataset)."""
+        if not self.examples:
+            return Language.ENGLISH
+        return self.examples[0].language
+
+    def filter_by_category(self, category: RetrievalCategory) -> "RetrievalDataset":
+        """Return a new dataset with only examples of the given category."""
+        filtered = tuple(ex for ex in self.examples if ex.category == category)
+        return RetrievalDataset(
+            evaluation_set_version=self.evaluation_set_version,
+            corpus_version=self.corpus_version,
+            examples=filtered,
+        )
+
+    def filter_by_difficulty(self, difficulty: Difficulty) -> "RetrievalDataset":
+        """Return a new dataset with only examples of the given difficulty."""
+        filtered = tuple(ex for ex in self.examples if ex.difficulty == difficulty)
+        return RetrievalDataset(
+            evaluation_set_version=self.evaluation_set_version,
+            corpus_version=self.corpus_version,
+            examples=filtered,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerExample:
+    """A single answer generation evaluation example."""
+
+    id: str
+    language: Language
+    query: str
+    expected_answer_characteristics: dict[str, Any] = field(default_factory=dict)
+    expected_citation_source_ids: tuple[str, ...] = ()
+    expected_status: AnswerStatus = AnswerStatus.ANSWERED
+    expected_language: Language = Language.ENGLISH
+    refusal_expected: bool = False
+    refusal_type: RefusalType | None = None
+    category: str | None = None
+    difficulty: Difficulty | None = None
+    notes: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.id.strip():
+            raise ValueError("id must not be empty")
+        if not self.query.strip():
+            raise ValueError("query must not be empty")
+        if self.refusal_expected and self.refusal_type is None:
+            raise ValueError("refusal_type required when refusal_expected is True")
+        if not self.refusal_expected and self.refusal_type is not None:
+            raise ValueError("refusal_type only allowed when refusal_expected is True")
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerDataset:
+    """Versioned answer generation evaluation dataset."""
+
+    evaluation_set_version: str
+    corpus_version: str
+    system_version: str = ""
+    examples: tuple[AnswerExample, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.evaluation_set_version.strip():
+            raise ValueError("evaluation_set_version must not be empty")
+        if not self.corpus_version.strip():
+            raise ValueError("corpus_version must not be empty")
+        if not self.examples:
+            raise ValueError("examples must not be empty")
+        ids = [ex.id for ex in self.examples]
+        if len(set(ids)) != len(ids):
+            raise ValueError("example ids must be unique")
+
+    @property
+    def language(self) -> Language:
+        if not self.examples:
+            return Language.ENGLISH
+        return self.examples[0].language
+
+
+@dataclass(frozen=True, slots=True)
+class SafetyExample:
+    """A single safety/refusal evaluation example."""
+
+    id: str
+    language: Language
+    query: str
+    expected_status: AnswerStatus
+    refusal_type: RefusalType | None = None
+    notes: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.id.strip():
+            raise ValueError("id must not be empty")
+        if not self.query.strip():
+            raise ValueError("query must not be empty")
+        if self.expected_status in (AnswerStatus.NEEDS_CLARIFICATION, AnswerStatus.ABSTAINED):
+            if self.refusal_type is None:
+                raise ValueError("refusal_type required for clarification/abstention")
+        else:
+            if self.refusal_type is not None:
+                raise ValueError("refusal_type only allowed for clarification/abstention")
+
+
+@dataclass(frozen=True, slots=True)
+class SafetyDataset:
+    """Versioned safety evaluation dataset."""
+
+    evaluation_set_version: str
+    examples: tuple[SafetyExample, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.evaluation_set_version.strip():
+            raise ValueError("evaluation_set_version must not be empty")
+        if not self.examples:
+            raise ValueError("examples must not be empty")
+        ids = [ex.id for ex in self.examples]
+        if len(set(ids)) != len(ids):
+            raise ValueError("example ids must be unique")
+
+
+def load_retrieval_dataset(path: str | Path) -> RetrievalDataset:
+    """Load and validate a retrieval evaluation dataset from JSON."""
+    path = Path(path)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise ValueError(f"cannot read evaluation dataset {path}: {error}") from error
+    except json.JSONDecodeError as error:
+        raise ValueError(f"invalid evaluation dataset JSON: {error.msg}") from error
+
+    if not isinstance(raw, dict):
+        raise ValueError("evaluation dataset must be a JSON object")
+
+    examples_data = raw.get("examples")
+    if not isinstance(examples_data, list):
+        raise ValueError("evaluation dataset examples must be a list")
+
+    # Handle unavailable datasets
+    if raw.get("unavailable"):
+        return RetrievalDataset(
+            evaluation_set_version=raw["evaluation_set_version"],
+            corpus_version=raw["corpus_version"],
+            examples=(),
+        )
+
+    if not examples_data:
+        raise ValueError("evaluation dataset examples must be a list")
+
+    examples: list[RetrievalExample] = []
+    for index, item in enumerate(examples_data):
+        if not isinstance(item, dict):
+            raise ValueError(f"evaluation example {index} must be a JSON object")
+
+        # Support both 'relevant_chunk_ids' (legacy) and 'expected_chunk_ids' (new)
+        chunk_ids = item.get("expected_chunk_ids") or item.get("relevant_chunk_ids")
+        if chunk_ids is None:
+            raise ValueError(f"evaluation example {index} missing expected_chunk_ids or relevant_chunk_ids")
+
+        try:
+            examples.append(RetrievalExample(
+                id=item.get("id", f"auto-{index}"),
+                language=Language(item.get("language", "en")),
+                query=item["query"],
+                expected_chunk_ids=tuple(chunk_ids),
+                expected_source_ids=tuple(item.get("expected_source_ids", [])),
+                category=RetrievalCategory(item["category"]) if item.get("category") else None,
+                difficulty=Difficulty(item["difficulty"]) if item.get("difficulty") else None,
+                notes=item.get("notes", ""),
+            ))
+        except (KeyError, ValueError) as error:
+            raise ValueError(f"evaluation example {index} invalid: {error}") from error
+
+    return RetrievalDataset(
+        evaluation_set_version=raw["evaluation_set_version"],
+        corpus_version=raw["corpus_version"],
+        examples=tuple(examples),
+    )
+
+
+def load_answer_dataset(path: str | Path) -> AnswerDataset:
+    """Load and validate an answer generation evaluation dataset from JSON."""
+    path = Path(path)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise ValueError(f"cannot read evaluation dataset {path}: {error}") from error
+    except json.JSONDecodeError as error:
+        raise ValueError(f"invalid evaluation dataset JSON: {error.msg}") from error
+
+    if not isinstance(raw, dict):
+        raise ValueError("evaluation dataset must be a JSON object")
+
+    examples_data = raw.get("examples")
+    if not isinstance(examples_data, list):
+        raise ValueError("evaluation dataset examples must be a list")
+
+    examples: list[AnswerExample] = []
+    for index, item in enumerate(examples_data):
+        if not isinstance(item, dict):
+            raise ValueError(f"evaluation example {index} must be a JSON object")
+
+        try:
+            examples.append(AnswerExample(
+                id=item.get("id", f"auto-{index}"),
+                language=Language(item.get("language", "en")),
+                query=item["query"],
+                expected_answer_characteristics=item.get("expected_answer_characteristics", {}),
+                expected_citation_source_ids=tuple(item.get("expected_citation_source_ids", [])),
+                expected_status=AnswerStatus(item.get("expected_status", "answered")),
+                expected_language=Language(item.get("expected_language", "en")),
+                refusal_expected=item.get("refusal_expected", False),
+                refusal_type=RefusalType(item["refusal_type"]) if item.get("refusal_type") else None,
+                category=item.get("category"),
+                difficulty=Difficulty(item["difficulty"]) if item.get("difficulty") else None,
+                notes=item.get("notes", ""),
+            ))
+        except (KeyError, ValueError) as error:
+            raise ValueError(f"evaluation example {index} invalid: {error}") from error
+
+    return AnswerDataset(
+        evaluation_set_version=raw["evaluation_set_version"],
+        corpus_version=raw["corpus_version"],
+        system_version=raw.get("system_version", ""),
+        examples=tuple(examples),
+    )
+
+
+def load_safety_dataset(path: str | Path) -> SafetyDataset:
+    """Load and validate a safety evaluation dataset from JSON."""
+    path = Path(path)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise ValueError(f"cannot read evaluation dataset {path}: {error}") from error
+    except json.JSONDecodeError as error:
+        raise ValueError(f"invalid evaluation dataset JSON: {error.msg}") from error
+
+    if not isinstance(raw, dict):
+        raise ValueError("evaluation dataset must be a JSON object")
+
+    examples_data = raw.get("examples")
+    if not isinstance(examples_data, list):
+        raise ValueError("evaluation dataset examples must be a list")
+
+    examples: list[SafetyExample] = []
+    for index, item in enumerate(examples_data):
+        if not isinstance(item, dict):
+            raise ValueError(f"evaluation example {index} must be a JSON object")
+
+        try:
+            examples.append(SafetyExample(
+                id=item.get("id", f"auto-{index}"),
+                language=Language(item.get("language", "en")),
+                query=item["query"],
+                expected_status=AnswerStatus(item["expected_status"]),
+                refusal_type=RefusalType(item["refusal_type"]) if item.get("refusal_type") else None,
+                notes=item.get("notes", ""),
+            ))
+        except (KeyError, ValueError) as error:
+            raise ValueError(f"evaluation example {index} invalid: {error}") from error
+
+    return SafetyDataset(
+        evaluation_set_version=raw["evaluation_set_version"],
+        examples=tuple(examples),
+    )
