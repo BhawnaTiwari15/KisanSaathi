@@ -21,15 +21,21 @@ class LanguageMetrics:
     corpus_version: str
     query_count: int
     systems: dict[str, dict[str, float]]  # system_name -> {hit_rate, recall}
+    unavailable: bool = False
+    unavailable_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d = {
             "language": self.language.value,
             "dataset_version": self.dataset_version,
             "corpus_version": self.corpus_version,
             "query_count": self.query_count,
             "systems": self.systems,
+            "unavailable": self.unavailable,
         }
+        if self.unavailable:
+            d["unavailable_reason"] = self.unavailable_reason
+        return d
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,13 +48,17 @@ class MultilingualReport:
     top_k: int
     languages: tuple[LanguageMetrics, ...]
     english_baseline: LanguageMetrics | None = None
+    unavailable_languages: tuple[LanguageMetrics, ...] = ()
 
     def get_gap(self, language: Language, metric: str) -> float | None:
-        """Get the gap between English and the given language for a metric."""
-        if self.english_baseline is None:
+        """Get the gap between English and the given language for a metric.
+
+        Returns None if either language is unavailable or has no valid metric.
+        """
+        if self.english_baseline is None or self.english_baseline.unavailable:
             return None
         lang_metrics = next((lm for lm in self.languages if lm.language == language), None)
-        if lang_metrics is None:
+        if lang_metrics is None or lang_metrics.unavailable:
             return None
         # Average across systems
         eng_val = sum(s.get(metric, 0.0) for s in self.english_baseline.systems.values()) / max(1, len(self.english_baseline.systems))
@@ -62,6 +72,7 @@ class MultilingualReport:
             "system_version": self.system_version,
             "top_k": self.top_k,
             "languages": [lm.to_dict() for lm in self.languages],
+            "unavailable_languages": [lm.to_dict() for lm in self.unavailable_languages],
             "english_baseline": self.english_baseline.to_dict() if self.english_baseline else None,
         }
 
@@ -70,6 +81,7 @@ def find_retrieval_datasets(base_path: str | Path) -> dict[Language, Path]:
     """Find available retrieval evaluation datasets by language.
 
     Looks for files matching: retrieval_{lang}_v{version}.json
+    Also checks parent directory for English dataset (retrieval_en_v*.json).
     """
     base = Path(base_path)
     datasets: dict[Language, Path] = {}
@@ -84,6 +96,16 @@ def find_retrieval_datasets(base_path: str | Path) -> dict[Language, Path]:
             # Use the latest version (highest version number)
             latest = max(matches, key=lambda p: int(p.stem.split("_v")[-1]) if "_v" in p.stem else 0)
             datasets[lang] = latest
+
+    # Also check parent directory for English dataset (retrieval_en_v*.json)
+    if Language.ENGLISH not in datasets:
+        parent = base.parent
+        if parent.exists():
+            pattern = "retrieval_en_v*.json"
+            matches = list(parent.glob(pattern))
+            if matches:
+                latest = max(matches, key=lambda p: int(p.stem.split("_v")[-1]) if "_v" in p.stem else 0)
+                datasets[Language.ENGLISH] = latest
 
     return datasets
 
@@ -113,10 +135,22 @@ def run_multilingual_retrieval_evaluation(
     from datetime import datetime
 
     language_results: list[LanguageMetrics] = []
+    unavailable_languages: list[LanguageMetrics] = []
     english_baseline: LanguageMetrics | None = None
 
     for lang, dataset in datasets.items():
-        if not dataset.examples:
+        if dataset.unavailable or not dataset.examples:
+            # Create unavailable language metrics
+            lm = LanguageMetrics(
+                language=lang,
+                dataset_version=dataset.evaluation_set_version,
+                corpus_version=dataset.corpus_version,
+                query_count=0,
+                systems={},
+                unavailable=True,
+                unavailable_reason=dataset.unavailable_reason or "No genuine relevance labels available for this language",
+            )
+            unavailable_languages.append(lm)
             continue
 
         results = evaluate_systems(systems, dataset, k=k, system_version=system_version)
@@ -147,6 +181,7 @@ def run_multilingual_retrieval_evaluation(
         top_k=k,
         languages=tuple(language_results),
         english_baseline=english_baseline,
+        unavailable_languages=tuple(unavailable_languages),
     )
 
 
@@ -163,7 +198,7 @@ def print_multilingual_summary(report: MultilingualReport) -> str:
         "",
     ]
 
-    # Table header
+    # Collect all systems from available languages
     systems = set()
     for lm in report.languages:
         systems.update(lm.systems.keys())
@@ -182,26 +217,52 @@ def print_multilingual_summary(report: MultilingualReport) -> str:
         lines.append("| " + " | ".join(header) + " |")
         lines.append("| " + " | ".join(["---"] * len(header)) + " |")
 
+        # Available languages
         for lm in report.languages:
             row = [lm.language.value, str(lm.query_count)]
             for sys_name in systems:
                 val = lm.systems.get(sys_name, {}).get(metric, 0.0)
                 row.append(f"{val:.3f}")
             lines.append("| " + " | ".join(row) + " |")
+
+        # Unavailable languages
+        for lm in report.unavailable_languages:
+            row = [lm.language.value, "0 (unavailable)"]
+            for _ in systems:
+                row.append("UNAVAILABLE")
+            lines.append("| " + " | ".join(row) + " |")
         lines.append("")
 
     # Gap analysis
-    if report.english_baseline:
+    if report.english_baseline and not report.english_baseline.unavailable:
         lines.append("## English vs Indic Language Gap (Recall@K)")
         lines.append("")
-        lines.append("| Language | Gap vs English |")
-        lines.append("| --- | --- |")
+        lines.append("| Language | Gap vs English | Status |")
+        lines.append("| --- | --- | --- |")
         for lm in report.languages:
             if lm.language == Language.ENGLISH:
                 continue
             gap = report.get_gap(lm.language, "recall_at_k")
             if gap is not None:
-                lines.append(f"| {lm.language.value} | {gap:+.3f} |")
+                lines.append(f"| {lm.language.value} | {gap:+.3f} | measured |")
+            else:
+                lines.append(f"| {lm.language.value} | N/A | unavailable — {lm.unavailable_reason} |")
+        # Also show explicitly unavailable languages not in languages tuple
+        for lm in report.unavailable_languages:
+            if lm.language != Language.ENGLISH:
+                lines.append(f"| {lm.language.value} | N/A | unavailable — {lm.unavailable_reason} |")
         lines.append("")
+
+    # Limitations section
+    lines.extend([
+        "## Limitations",
+        "",
+        "- English baseline: 10 queries only — not statistically significant",
+        "- Hindi/Kannada/Telugu: No genuine relevance labels exist — metrics unavailable",
+        "- Marathi: Source document exists but not a target evaluation language",
+        "- Gap analysis requires genuine labels for both English and target language",
+        "- **No multilingual retrieval metric is reported until genuine relevance labels exist for that language.**",
+        "",
+    ])
 
     return "\n".join(lines)

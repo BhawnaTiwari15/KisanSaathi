@@ -162,3 +162,68 @@ Uses `FakeLLMJudge` by default (no API calls). Real judges implemented programma
 - No confidence intervals or statistical significance
 - Results not comparable across different judge providers/models/configurations
 - Context precision/recall require reference contexts (unavailable when missing)
+
+## Multilingual retrieval evaluation (new)
+
+A `kisansathi.evaluation.multilingual` module provides **cross-language retrieval evaluation** with per-language Hit@K and Recall@K metrics. This is **separate from answer-quality evaluation** — it measures "Did we retrieve the right evidence?" not "Did the answer use evidence correctly?"
+
+### Current Language Coverage
+
+| Language | Source Documents | Genuine Labels | Status |
+|----------|-----------------|----------------|--------|
+| English | PM-KISAN FAQ, MH PDMC | ✅ 10 queries | **Available** |
+| Hindi | None | ❌ | **Unavailable** |
+| Kannada | None | ❌ | **Unavailable** |
+| Telugu | None | ❌ | **Unavailable** |
+| Marathi | MH PDMC (bilingual) | ❌ | **Excluded** — not a target evaluation language |
+
+**No multilingual retrieval metric is reported until genuine relevance labels exist for that language.**
+
+### Metrics
+
+- **Hit@5**: Fraction of queries with ≥1 relevant chunk in top 5
+- **Recall@5**: Macro-averaged fraction of relevant chunks found in top 5 (primary metric)
+- **Retrieval Gap**: English Recall@5 − Target Language Recall@5 (only when both have genuine labels)
+
+### Architecture
+
+- **Per-language versioned benchmarks**: `data/evaluation/retrieval/retrieval_{lang}_v{n}.json`
+- **Unavailable language handling**: Explicit `unavailable=true` with reason; never reported as 0.0
+- **Reproducibility metadata**: Benchmark version, corpus checksum, retrieval config, K, timestamp, evaluator version
+- **Native-speaker annotation workflow**: Queries authored by native speakers; relevance judged against source documents
+- **No mechanical translation**: Translated English queries are NOT valid benchmarks
+
+### CLI
+
+```powershell
+python -m kisansathi.evaluation.main multilingual ^
+  --base-path data/evaluation/retrieval ^
+  --output-jsonl output/multilingual.jsonl ^
+  --output-markdown output/multilingual.md ^
+  --language en  # optional: filter to specific language (en/hi/kn/te/all)
+```
+
+### Reports
+
+- **Machine-readable JSONL** — one line per metric per language per system; unavailable languages marked explicitly
+- **Human-readable Markdown** — summary tables, gap analysis, unavailable languages listed with reasons, limitations section
+
+### Native Annotation Requirements
+
+Before reporting a Hindi/Kannada/Telugu retrieval score:
+
+1. Add source documents in that language to `data/sources.json` and `data/incoming/`
+2. Ingest documents (`python -m kisansathi.ingestion`)
+3. Native speaker formulates real farmer queries in that language
+4. Native speaker identifies relevant chunks from the corpus for each query
+5. Second native speaker validates (target Cohen's kappa ≥ 0.8)
+6. Write benchmark JSON with all metadata
+7. Run evaluation via CLI
+
+### Limitations
+
+- English baseline: 10 queries only — not statistically significant
+- Hindi/Kannada/Telugu: No source documents in corpus AND no relevance labels
+- Marathi: Source exists (MH PDMC) but not a target evaluation language
+- Gap analysis requires genuine labels for both English and target language
+- **No multilingual retrieval metric is reported until genuine relevance labels exist for that language**

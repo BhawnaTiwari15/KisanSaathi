@@ -233,3 +233,32 @@ esolve_evidence_batch collect refusals in a CitationBatch instead of raising, so
 **Reason:** Semantic answer quality requires LLM judgment and is fundamentally different from deterministic citation/status checks. Keeping it separate preserves pytest determinism (no LLM calls in CI) while providing opt-in RAGAS-style metrics. The adapter approach avoids adding RAGAS as a hard dependency (extra weight, version coupling) while maintaining metric compatibility.
 
 **Trade-off:** Judge bias/variance affects scores; no confidence intervals or statistical significance. Results not comparable across different judge providers/models/configurations. Context precision/recall require reference contexts (unavailable when missing). Cost/latency of real judge calls. No offline mode for semantic metrics (fake judge for tests only).
+
+## 2026-10-07: Add multilingual retrieval evaluation
+
+**Decision:** Add `kisansathi.evaluation.multilingual` with per-language Hit@K and Recall@K metrics, explicit unavailable language handling, retrieval gap calculation, and native-speaker annotation workflow. The existing English benchmark (`retrieval-en-v1.json`, 10 queries) is preserved unchanged. Hindi, Kannada, and Telugu datasets exist as unavailable placeholders (`unavailable=true` with reason). Marathi has a source document but is not a target evaluation language.
+
+**Architecture:**
+- **Per-language versioned benchmarks**: `data/evaluation/retrieval/retrieval_{lang}_v{n}.json` with `unavailable` flag and `annotation_metadata`
+- **Extended schema**: `RetrievalExample` adds `relevance_grades` (0-3), `annotator`, `annotation_timestamp_utc`; `RetrievalDataset` adds `unavailable`, `unavailable_reason`, `annotation_metadata`
+- **Unavailable language handling**: Languages without genuine labels are reported as `unavailable` with reason; never as 0.0 scores
+- **Retrieval gap**: `English Recall@5 - Target Language Recall@5` — only calculated when BOTH have genuine labels
+- **No mechanical translation**: Queries must be authored by native speakers; translated English queries are invalid benchmarks
+- **Native annotation workflow**: Requires source docs in target language, native speaker query formulation, chunk relevance identification, inter-annotator agreement (kappa ≥ 0.8)
+- **Separation from answer-quality**: Retrieval evaluation = "Did we retrieve the right evidence?" (deterministic); Answer-quality = "Did the answer use evidence correctly?" (LLM judge)
+- **Reproducibility**: Benchmark version, corpus checksum, retrieval config, K, timestamp, evaluator version in every report
+
+**Benchmarks:**
+- English: `retrieval-en-v1.json` (10 queries, corpus-versioned, measured: Dense Hit@5=0.80, BM25 Hit@5=0.90, Hybrid Hit@5=0.90, Hybrid+Reranker Hit@5=0.90, Hybrid+Reranker Recall@5=0.90)
+- Hindi: `retrieval_hi_v1.json` (unavailable — no source docs, no labels)
+- Kannada: `retrieval_kn_v1.json` (unavailable — no source docs, no labels)
+- Telugu: `retrieval_te_v1.json` (unavailable — no source docs, no labels)
+- Marathi: Source exists (MH PDMC bilingual) but excluded as non-target language
+
+**Reports:**
+- Machine-readable JSONL: per language, per system, per metric; unavailable languages marked with `unavailable=true` and reason
+- Human-readable Markdown: summary tables, gap analysis, unavailable languages listed, limitations section
+
+**Reason:** Multilingual retrieval quality cannot be measured without genuine relevance labels. The current corpus has no Hindi/Kannada/Telugu source documents. The design makes unavailable languages explicit rather than fabricating scores, and provides a clear path for native-speaker annotation when source documents are added. Keeping retrieval evaluation separate from answer-quality preserves the deterministic vs. semantic distinction.
+
+**Trade-off:** English baseline is only 10 queries — not statistically significant. Gap analysis requires labels for both languages. No multilingual retrieval metric is reported until genuine relevance labels exist for that language. Marathi source document exists but is not evaluated unless added as a target language. Mechanical query translation is explicitly prohibited.

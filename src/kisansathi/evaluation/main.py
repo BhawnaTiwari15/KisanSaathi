@@ -23,7 +23,7 @@ from kisansathi.evaluation.report import (
     write_jsonl,
 )
 from kisansathi.evaluation.retrieval import RetrievalEvaluationResult, evaluate_systems
-from kisansathi.evaluation.schemas import load_answer_quality_dataset, load_retrieval_dataset
+from kisansathi.evaluation.schemas import Language, load_answer_quality_dataset, load_retrieval_dataset
 from kisansathi.retrieval.bm25_retriever import BM25Retriever
 from kisansathi.retrieval.bm25_store import BM25Store
 from kisansathi.retrieval.embeddings import EmbeddingService
@@ -106,6 +106,7 @@ def run_multilingual_evaluation(
     output_markdown: str | None = None,
     k: int = 5,
     system_version: str = "",
+    language_filter: str = "all",
 ) -> Any:
     """Run multilingual retrieval evaluation."""
     from kisansathi.evaluation.multilingual import (
@@ -114,6 +115,7 @@ def run_multilingual_evaluation(
         print_multilingual_summary,
     )
     from kisansathi.evaluation.report import generate_multilingual_jsonl, generate_multilingual_markdown, write_jsonl
+    from kisansathi.evaluation.schemas import Language
 
     settings = Settings.from_env()
 
@@ -126,6 +128,18 @@ def run_multilingual_evaluation(
         if not datasets:
             print("No retrieval datasets found.", file=sys.stderr)
             return None
+
+        # Apply language filter
+        if language_filter != "all":
+            try:
+                target_lang = Language(language_filter)
+                datasets = {lang: ds for lang, ds in datasets.items() if lang == target_lang}
+                if not datasets:
+                    print(f"No dataset found for language: {language_filter}", file=sys.stderr)
+                    return None
+            except ValueError:
+                print(f"Invalid language: {language_filter}", file=sys.stderr)
+                return None
 
         report = run_multilingual_retrieval_evaluation(systems, datasets, k=k, system_version=system_version)
 
@@ -277,6 +291,12 @@ def main() -> int:
         default="",
         help="System version identifier",
     )
+    multi_parser.add_argument(
+        "--language",
+        choices=["en", "hi", "kn", "te", "all"],
+        default="all",
+        help="Filter evaluation to specific language (default: all)",
+    )
 
     # Answer evaluation (deterministic)
     answer_parser = subparsers.add_parser("answer", help="Run deterministic answer quality evaluation")
@@ -425,6 +445,7 @@ def main() -> int:
                 output_markdown=args.output_markdown,
                 k=args.k,
                 system_version=args.system_version,
+                language_filter=args.language,
             )
             return 0
 

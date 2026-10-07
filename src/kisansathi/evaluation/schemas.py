@@ -54,6 +54,9 @@ class RetrievalExample:
     expected_source_ids: tuple[str, ...] = ()
     category: RetrievalCategory | None = None
     difficulty: Difficulty | None = None
+    relevance_grades: dict[str, int] | None = None
+    annotator: str | None = None
+    annotation_timestamp_utc: str | None = None
     notes: str = ""
 
     def __post_init__(self) -> None:
@@ -67,6 +70,12 @@ class RetrievalExample:
             raise ValueError("expected_chunk_ids must not contain empty strings")
         if len(set(self.expected_chunk_ids)) != len(self.expected_chunk_ids):
             raise ValueError("expected_chunk_ids must not contain duplicates")
+        if self.relevance_grades is not None:
+            for chunk_id, grade in self.relevance_grades.items():
+                if not isinstance(grade, int) or not (0 <= grade <= 3):
+                    raise ValueError(f"relevance_grades must be integers 0-3, got {grade} for {chunk_id}")
+                if chunk_id not in self.expected_chunk_ids:
+                    raise ValueError(f"relevance_grades contains chunk_id not in expected_chunk_ids: {chunk_id}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +84,10 @@ class RetrievalDataset:
 
     evaluation_set_version: str
     corpus_version: str
-    examples: tuple[RetrievalExample, ...]
+    examples: tuple[RetrievalExample, ...] = ()
+    unavailable: bool = False
+    unavailable_reason: str = ""
+    annotation_metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.evaluation_set_version.strip():
@@ -83,9 +95,17 @@ class RetrievalDataset:
         if not self.corpus_version.strip():
             raise ValueError("corpus_version must not be empty")
         # Allow empty examples for unavailable datasets
+        if not self.unavailable and not self.examples:
+            raise ValueError("examples must not be empty for available datasets")
         ids = [ex.id for ex in self.examples]
         if len(set(ids)) != len(ids):
             raise ValueError("example ids must be unique")
+        # Validate all examples have the same language
+        if self.examples:
+            first_lang = self.examples[0].language
+            for ex in self.examples:
+                if ex.language != first_lang:
+                    raise ValueError("all examples in a dataset must have the same language")
 
     @property
     def language(self) -> Language:
@@ -365,10 +385,15 @@ def load_retrieval_dataset(path: str | Path) -> RetrievalDataset:
 
     # Handle unavailable datasets
     if raw.get("unavailable"):
+        # Support both 'reason' (legacy) and 'unavailable_reason' (new)
+        unavailable_reason = raw.get("unavailable_reason") or raw.get("reason", "No genuine relevance labels available for this language")
         return RetrievalDataset(
             evaluation_set_version=raw["evaluation_set_version"],
             corpus_version=raw["corpus_version"],
             examples=(),
+            unavailable=True,
+            unavailable_reason=unavailable_reason,
+            annotation_metadata=raw.get("annotation_metadata", {}),
         )
 
     if not examples_data:
@@ -393,6 +418,9 @@ def load_retrieval_dataset(path: str | Path) -> RetrievalDataset:
                 expected_source_ids=tuple(item.get("expected_source_ids", [])),
                 category=RetrievalCategory(item["category"]) if item.get("category") else None,
                 difficulty=Difficulty(item["difficulty"]) if item.get("difficulty") else None,
+                relevance_grades=item.get("relevance_grades") or None,
+                annotator=item.get("annotator") or None,
+                annotation_timestamp_utc=item.get("annotation_timestamp_utc") or None,
                 notes=item.get("notes", ""),
             ))
         except (KeyError, ValueError) as error:
@@ -402,6 +430,9 @@ def load_retrieval_dataset(path: str | Path) -> RetrievalDataset:
         evaluation_set_version=raw["evaluation_set_version"],
         corpus_version=raw["corpus_version"],
         examples=tuple(examples),
+        unavailable=raw.get("unavailable", False),
+        unavailable_reason=raw.get("unavailable_reason", ""),
+        annotation_metadata=raw.get("annotation_metadata", {}),
     )
 
 

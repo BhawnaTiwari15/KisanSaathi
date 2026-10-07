@@ -170,6 +170,7 @@ def generate_answer_quality_jsonl(summary: AnswerQualityEvaluationSummary) -> li
 def generate_multilingual_jsonl(report: MultilingualReport) -> list[str]:
     """Generate JSONL lines for multilingual report."""
     lines = []
+    # Available languages
     for lm in report.languages:
         for sys_name, metrics in lm.systems.items():
             for metric_name, value in metrics.items():
@@ -185,6 +186,36 @@ def generate_multilingual_jsonl(report: MultilingualReport) -> list[str]:
                     "timestamp_utc": report.evaluation_timestamp_utc,
                     "query_count": lm.query_count,
                 }))
+    # Unavailable languages
+    for lm in report.unavailable_languages:
+        lines.append(json_dumps({
+            "benchmark_version": lm.dataset_version,
+            "corpus_version": lm.corpus_version,
+            "system_version": report.system_version,
+            "metric": "hit_rate_at_k",
+            "language": lm.language.value,
+            "system": "all",
+            "value": None,
+            "k": report.top_k,
+            "timestamp_utc": report.evaluation_timestamp_utc,
+            "query_count": 0,
+            "unavailable": True,
+            "unavailable_reason": lm.unavailable_reason,
+        }))
+        lines.append(json_dumps({
+            "benchmark_version": lm.dataset_version,
+            "corpus_version": lm.corpus_version,
+            "system_version": report.system_version,
+            "metric": "recall_at_k",
+            "language": lm.language.value,
+            "system": "all",
+            "value": None,
+            "k": report.top_k,
+            "timestamp_utc": report.evaluation_timestamp_utc,
+            "query_count": 0,
+            "unavailable": True,
+            "unavailable_reason": lm.unavailable_reason,
+        }))
     return lines
 
 

@@ -239,6 +239,7 @@ class TestRetrievalDatasetValidation(unittest.TestCase):
             evaluation_set_version="v1",
             corpus_version="corpus-v1",
             examples=(),
+            unavailable=True,
         )
         self.assertEqual(len(ds.examples), 0)
 
@@ -1225,6 +1226,550 @@ class TestLoadAnswerQualityDataset(unittest.TestCase):
             self.assertTrue(case.can_compute_answer_relevance)
             self.assertTrue(case.can_compute_context_precision)
             self.assertTrue(case.can_compute_context_recall)
+
+
+class TestMultilingualRetrievalExample(unittest.TestCase):
+    """Tests for RetrievalExample schema with multilingual fields."""
+
+    def test_valid_example_all_fields(self):
+        ex = RetrievalExample(
+            id="retrieval-hi-001",
+            language=Language.HINDI,
+            query="पीएम-किसान योजना क्या है?",
+            expected_chunk_ids=("pm-kisan-revised-faq:2787659275fd0ef87c939e28",),
+            expected_source_ids=("pm-kisan-revised-faq",),
+            category=RetrievalCategory.SCHEME_DETAILS,
+            difficulty=Difficulty.EASY,
+            relevance_grades={"pm-kisan-revised-faq:2787659275fd0ef87c939e28": 3},
+            annotator="annotator-1",
+            annotation_timestamp_utc="2026-10-15T10:30:00Z",
+            notes="Test note",
+        )
+        self.assertEqual(ex.id, "retrieval-hi-001")
+        self.assertEqual(ex.language, Language.HINDI)
+        self.assertEqual(ex.relevance_grades, {"pm-kisan-revised-faq:2787659275fd0ef87c939e28": 3})
+        self.assertEqual(ex.annotator, "annotator-1")
+
+    def test_valid_example_minimal_fields(self):
+        ex = RetrievalExample(
+            id="retrieval-en-001",
+            language=Language.ENGLISH,
+            query="What is PM-KISAN?",
+            expected_chunk_ids=("chunk1",),
+        )
+        self.assertEqual(ex.relevance_grades, None)
+        self.assertIsNone(ex.annotator)
+        self.assertIsNone(ex.annotation_timestamp_utc)
+
+    def test_empty_id_fails(self):
+        with self.assertRaises(ValueError):
+            RetrievalExample(id="", language=Language.ENGLISH, query="test", expected_chunk_ids=("c1",))
+
+    def test_empty_query_fails(self):
+        with self.assertRaises(ValueError):
+            RetrievalExample(id="q1", language=Language.ENGLISH, query="", expected_chunk_ids=("c1",))
+
+    def test_empty_expected_chunk_ids_fails(self):
+        with self.assertRaises(ValueError):
+            RetrievalExample(id="q1", language=Language.ENGLISH, query="test", expected_chunk_ids=())
+
+    def test_duplicate_chunk_ids_fails(self):
+        with self.assertRaises(ValueError):
+            RetrievalExample(id="q1", language=Language.ENGLISH, query="test", expected_chunk_ids=("c1", "c1"))
+
+    def test_invalid_relevance_grade_fails(self):
+        with self.assertRaises(ValueError):
+            RetrievalExample(
+                id="q1",
+                language=Language.ENGLISH,
+                query="test",
+                expected_chunk_ids=("c1",),
+                relevance_grades={"c1": 5},  # Must be 0-3
+            )
+
+    def test_relevance_grade_chunk_not_in_expected_fails(self):
+        with self.assertRaises(ValueError):
+            RetrievalExample(
+                id="q1",
+                language=Language.ENGLISH,
+                query="test",
+                expected_chunk_ids=("c1",),
+                relevance_grades={"c2": 3},  # c2 not in expected_chunk_ids
+            )
+
+
+class TestMultilingualRetrievalDataset(unittest.TestCase):
+    """Tests for RetrievalDataset with multilingual fields."""
+
+    def test_valid_dataset(self):
+        examples = (
+            RetrievalExample(id="q1", language=Language.ENGLISH, query="q1", expected_chunk_ids=("c1",)),
+            RetrievalExample(id="q2", language=Language.ENGLISH, query="q2", expected_chunk_ids=("c2",)),
+        )
+        ds = RetrievalDataset(
+            evaluation_set_version="retrieval-en-v1",
+            corpus_version="corpus-v1",
+            examples=examples,
+            annotation_metadata={"annotator_count": 2, "inter_annotator_agreement": 0.85},
+        )
+        self.assertEqual(len(ds.examples), 2)
+        self.assertEqual(ds.annotation_metadata["annotator_count"], 2)
+
+    def test_unavailable_dataset_empty_examples_allowed(self):
+        ds = RetrievalDataset(
+            evaluation_set_version="retrieval-hi-v1",
+            corpus_version="corpus-v1",
+            examples=(),
+            unavailable=True,
+            unavailable_reason="No genuine Hindi labels",
+            annotation_metadata={},
+        )
+        self.assertTrue(ds.unavailable)
+        self.assertEqual(len(ds.examples), 0)
+
+    def test_available_dataset_empty_examples_fails(self):
+        with self.assertRaises(ValueError):
+            RetrievalDataset(
+                evaluation_set_version="retrieval-en-v1",
+                corpus_version="corpus-v1",
+                examples=(),
+                unavailable=False,
+            )
+
+    def test_duplicate_ids_fails(self):
+        with self.assertRaises(ValueError):
+            RetrievalDataset(
+                evaluation_set_version="v1",
+                corpus_version="corpus-v1",
+                examples=(
+                    RetrievalExample(id="q1", language=Language.ENGLISH, query="q", expected_chunk_ids=("c1",)),
+                    RetrievalExample(id="q1", language=Language.ENGLISH, query="q", expected_chunk_ids=("c2",)),
+                ),
+            )
+
+    def test_mixed_languages_fails(self):
+        with self.assertRaises(ValueError):
+            RetrievalDataset(
+                evaluation_set_version="v1",
+                corpus_version="corpus-v1",
+                examples=(
+                    RetrievalExample(id="q1", language=Language.ENGLISH, query="q", expected_chunk_ids=("c1",)),
+                    RetrievalExample(id="q2", language=Language.HINDI, query="q", expected_chunk_ids=("c2",)),
+                ),
+            )
+
+    def test_language_property(self):
+        ds = RetrievalDataset(
+            evaluation_set_version="v1",
+            corpus_version="corpus-v1",
+            examples=(
+                RetrievalExample(id="q1", language=Language.HINDI, query="q", expected_chunk_ids=("c1",)),
+            ),
+        )
+        self.assertEqual(ds.language, Language.HINDI)
+
+        ds_empty = RetrievalDataset(
+            evaluation_set_version="v1",
+            corpus_version="corpus-v1",
+            examples=(),
+            unavailable=True,
+        )
+        self.assertEqual(ds_empty.language, Language.ENGLISH)
+
+
+class TestMultilingualDatasetLoading(unittest.TestCase):
+    """Tests for loading multilingual retrieval datasets."""
+
+    def test_load_english_dataset(self):
+        dataset = load_retrieval_dataset("data/evaluation/retrieval_en_v1.json")
+        self.assertEqual(dataset.evaluation_set_version, "retrieval-en-v1")
+        self.assertEqual(len(dataset.examples), 10)
+        self.assertFalse(dataset.unavailable)
+
+    def test_load_unavailable_hindi_dataset(self):
+        dataset = load_retrieval_dataset("data/evaluation/retrieval/retrieval_hi_v1.json")
+        self.assertEqual(dataset.evaluation_set_version, "retrieval-hi-v1")
+        self.assertTrue(dataset.unavailable)
+        self.assertEqual(len(dataset.examples), 0)
+        self.assertIn("Hindi", dataset.unavailable_reason)
+
+    def test_load_unavailable_kannada_dataset(self):
+        dataset = load_retrieval_dataset("data/evaluation/retrieval/retrieval_kn_v1.json")
+        self.assertTrue(dataset.unavailable)
+        self.assertIn("Kannada", dataset.unavailable_reason)
+
+    def test_load_unavailable_telugu_dataset(self):
+        dataset = load_retrieval_dataset("data/evaluation/retrieval/retrieval_te_v1.json")
+        self.assertTrue(dataset.unavailable)
+        self.assertIn("Telugu", dataset.unavailable_reason)
+
+
+class TestMultilingualMetrics(unittest.TestCase):
+    """Tests for Hit@5 and Recall@5 with multilingual support."""
+
+    def setUp(self):
+        self.dataset = RetrievalDataset(
+            evaluation_set_version="test-v1",
+            corpus_version="corpus-v1",
+            examples=(
+                RetrievalExample(id="q1", language=Language.ENGLISH, query="q1", expected_chunk_ids=("c1", "c2")),
+                RetrievalExample(id="q2", language=Language.ENGLISH, query="q2", expected_chunk_ids=("c3",)),
+            ),
+        )
+
+    def test_hit_at_5_perfect(self):
+        retriever = FakeRetriever({"q1": ["c1", "c2", "c4"], "q2": ["c3", "c5"]})
+        metrics, hit_rate, recall = evaluate_retriever(retriever, self.dataset, k=5)
+        self.assertEqual(hit_rate, 1.0)
+        self.assertEqual(recall, 1.0)
+
+    def test_hit_at_5_zero(self):
+        retriever = FakeRetriever({"q1": ["c4", "c5"], "q2": ["c6"]})
+        metrics, hit_rate, recall = evaluate_retriever(retriever, self.dataset, k=5)
+        self.assertEqual(hit_rate, 0.0)
+        self.assertEqual(recall, 0.0)
+
+    def test_recall_at_5_partial(self):
+        retriever = FakeRetriever({"q1": ["c1", "c4"], "q2": ["c3", "c5"]})
+        metrics, hit_rate, recall = evaluate_retriever(retriever, self.dataset, k=5)
+        # q1: matched 1 of 2 = 0.5, q2: matched 1 of 1 = 1.0
+        self.assertEqual(hit_rate, 1.0)
+        self.assertAlmostEqual(recall, 0.75)
+
+
+class TestPerLanguageAggregation(unittest.TestCase):
+    """Tests for per-language metric aggregation."""
+
+    def setUp(self):
+        self.en_dataset = RetrievalDataset(
+            evaluation_set_version="retrieval-en-v1",
+            corpus_version="corpus-v1",
+            examples=(
+                RetrievalExample(id="q1", language=Language.ENGLISH, query="q1", expected_chunk_ids=("c1", "c2")),
+                RetrievalExample(id="q2", language=Language.ENGLISH, query="q2", expected_chunk_ids=("c3",)),
+            ),
+        )
+        self.hi_dataset = RetrievalDataset(
+            evaluation_set_version="retrieval-hi-v1",
+            corpus_version="corpus-v1",
+            examples=(),
+            unavailable=True,
+            unavailable_reason="No genuine Hindi labels",
+        )
+
+    def test_english_aggregation(self):
+        retriever = FakeRetriever({"q1": ["c1", "c2"], "q2": ["c3"]})
+        result = evaluate_systems({"TestSystem": retriever}, self.en_dataset, k=5, system_version="v1")
+        self.assertEqual(result.systems[0].query_count, 2)
+        self.assertEqual(result.systems[0].hit_rate_at_k, 1.0)
+        self.assertEqual(result.systems[0].recall_at_k, 1.0)
+
+    def test_unavailable_language_skipped_in_evaluation(self):
+        # This test verifies that the multilingual evaluation skips unavailable languages
+        from kisansathi.evaluation.multilingual import run_multilingual_retrieval_evaluation
+        import asyncio
+
+        async def run_test():
+            systems = {"TestSystem": FakeRetriever({"q1": ["c1", "c2"], "q2": ["c3"]})}
+            datasets = {
+                Language.ENGLISH: self.en_dataset,
+                Language.HINDI: self.hi_dataset,
+            }
+            report = run_multilingual_retrieval_evaluation(systems, datasets, k=5, system_version="v1")
+            # English should be in languages
+            en_metrics = next((lm for lm in report.languages if lm.language == Language.ENGLISH), None)
+            self.assertIsNotNone(en_metrics)
+            self.assertEqual(en_metrics.query_count, 2)
+            # Hindi should be in unavailable_languages
+            hi_metrics = next((lm for lm in report.unavailable_languages if lm.language == Language.HINDI), None)
+            self.assertIsNotNone(hi_metrics)
+            self.assertTrue(hi_metrics.unavailable)
+        asyncio.run(run_test())
+
+
+class TestZeroCaseLanguageHandling(unittest.TestCase):
+    """Tests for handling languages with zero cases."""
+
+    def test_unavailable_language_reported_as_unavailable(self):
+        from kisansathi.evaluation.multilingual import LanguageMetrics
+
+        lm = LanguageMetrics(
+            language=Language.HINDI,
+            dataset_version="retrieval-hi-v1",
+            corpus_version="corpus-v1",
+            query_count=0,
+            systems={},
+            unavailable=True,
+            unavailable_reason="No genuine relevance labels",
+        )
+        self.assertTrue(lm.unavailable)
+        self.assertEqual(lm.query_count, 0)
+        d = lm.to_dict()
+        self.assertTrue(d["unavailable"])
+        self.assertIn("unavailable_reason", d)
+
+    def test_available_language_with_zero_queries(self):
+        from kisansathi.evaluation.multilingual import LanguageMetrics
+
+        lm = LanguageMetrics(
+            language=Language.ENGLISH,
+            dataset_version="retrieval-en-v1",
+            corpus_version="corpus-v1",
+            query_count=0,
+            systems={},
+            unavailable=False,
+        )
+        self.assertFalse(lm.unavailable)
+        d = lm.to_dict()
+        self.assertFalse(d["unavailable"])
+
+
+class TestRetrievalGapCalculation(unittest.TestCase):
+    """Tests for retrieval gap calculation."""
+
+    def test_gap_when_both_available(self):
+        from kisansathi.evaluation.multilingual import LanguageMetrics, MultilingualReport
+        from datetime import datetime
+
+        eng = LanguageMetrics(
+            language=Language.ENGLISH,
+            dataset_version="retrieval-en-v1",
+            corpus_version="corpus-v1",
+            query_count=10,
+            systems={"SystemA": {"hit_rate_at_k": 0.9, "recall_at_k": 0.85}},
+        )
+        hi = LanguageMetrics(
+            language=Language.HINDI,
+            dataset_version="retrieval-hi-v1",
+            corpus_version="corpus-v1",
+            query_count=10,
+            systems={"SystemA": {"hit_rate_at_k": 0.7, "recall_at_k": 0.6}},
+        )
+        report = MultilingualReport(
+            evaluation_timestamp_utc=datetime.utcnow().isoformat() + "Z",
+            corpus_version="corpus-v1",
+            system_version="v1",
+            top_k=5,
+            languages=(eng, hi),
+            english_baseline=eng,
+        )
+        gap = report.get_gap(Language.HINDI, "recall_at_k")
+        self.assertAlmostEqual(gap, 0.25)  # 0.85 - 0.60 = 0.25
+
+    def test_gap_none_when_target_unavailable(self):
+        from kisansathi.evaluation.multilingual import LanguageMetrics, MultilingualReport
+        from datetime import datetime
+
+        eng = LanguageMetrics(
+            language=Language.ENGLISH,
+            dataset_version="retrieval-en-v1",
+            corpus_version="corpus-v1",
+            query_count=10,
+            systems={"SystemA": {"hit_rate_at_k": 0.9, "recall_at_k": 0.85}},
+        )
+        hi = LanguageMetrics(
+            language=Language.HINDI,
+            dataset_version="retrieval-hi-v1",
+            corpus_version="corpus-v1",
+            query_count=0,
+            systems={},
+            unavailable=True,
+            unavailable_reason="No labels",
+        )
+        report = MultilingualReport(
+            evaluation_timestamp_utc=datetime.utcnow().isoformat() + "Z",
+            corpus_version="corpus-v1",
+            system_version="v1",
+            top_k=5,
+            languages=(eng,),
+            unavailable_languages=(hi,),
+            english_baseline=eng,
+        )
+        gap = report.get_gap(Language.HINDI, "recall_at_k")
+        self.assertIsNone(gap)
+
+    def test_gap_none_when_english_unavailable(self):
+        from kisansathi.evaluation.multilingual import LanguageMetrics, MultilingualReport
+        from datetime import datetime
+
+        eng = LanguageMetrics(
+            language=Language.ENGLISH,
+            dataset_version="retrieval-en-v1",
+            corpus_version="corpus-v1",
+            query_count=0,
+            systems={},
+            unavailable=True,
+            unavailable_reason="No English labels",
+        )
+        hi = LanguageMetrics(
+            language=Language.HINDI,
+            dataset_version="retrieval-hi-v1",
+            corpus_version="corpus-v1",
+            query_count=10,
+            systems={"SystemA": {"hit_rate_at_k": 0.7, "recall_at_k": 0.6}},
+        )
+        report = MultilingualReport(
+            evaluation_timestamp_utc=datetime.utcnow().isoformat() + "Z",
+            corpus_version="corpus-v1",
+            system_version="v1",
+            top_k=5,
+            languages=(hi,),
+            unavailable_languages=(eng,),
+            english_baseline=eng,
+        )
+        gap = report.get_gap(Language.HINDI, "recall_at_k")
+        self.assertIsNone(gap)
+
+
+class TestUnavailableLanguageReporting(unittest.TestCase):
+    """Tests for reporting unavailable languages."""
+
+    def test_report_includes_unavailable_languages(self):
+        from kisansathi.evaluation.multilingual import LanguageMetrics, MultilingualReport
+        from datetime import datetime
+
+        eng = LanguageMetrics(
+            language=Language.ENGLISH,
+            dataset_version="retrieval-en-v1",
+            corpus_version="corpus-v1",
+            query_count=10,
+            systems={"SystemA": {"hit_rate_at_k": 0.9, "recall_at_k": 0.85}},
+        )
+        hi = LanguageMetrics(
+            language=Language.HINDI,
+            dataset_version="retrieval-hi-v1",
+            corpus_version="corpus-v1",
+            query_count=0,
+            systems={},
+            unavailable=True,
+            unavailable_reason="No genuine Hindi labels",
+        )
+        report = MultilingualReport(
+            evaluation_timestamp_utc=datetime.utcnow().isoformat() + "Z",
+            corpus_version="corpus-v1",
+            system_version="v1",
+            top_k=5,
+            languages=(eng,),
+            unavailable_languages=(hi,),
+            english_baseline=eng,
+        )
+        d = report.to_dict()
+        self.assertEqual(len(d["languages"]), 1)
+        self.assertEqual(len(d["unavailable_languages"]), 1)
+        self.assertEqual(d["unavailable_languages"][0]["language"], "hi")
+        self.assertTrue(d["unavailable_languages"][0]["unavailable"])
+
+    def test_jsonl_includes_unavailable(self):
+        from kisansathi.evaluation.multilingual import LanguageMetrics, MultilingualReport
+        from datetime import datetime
+        from kisansathi.evaluation.report import generate_multilingual_jsonl
+
+        eng = LanguageMetrics(
+            language=Language.ENGLISH,
+            dataset_version="retrieval-en-v1",
+            corpus_version="corpus-v1",
+            query_count=10,
+            systems={"SystemA": {"hit_rate_at_k": 0.9, "recall_at_k": 0.85}},
+        )
+        hi = LanguageMetrics(
+            language=Language.HINDI,
+            dataset_version="retrieval-hi-v1",
+            corpus_version="corpus-v1",
+            query_count=0,
+            systems={},
+            unavailable=True,
+            unavailable_reason="No genuine Hindi labels",
+        )
+        report = MultilingualReport(
+            evaluation_timestamp_utc=datetime.utcnow().isoformat() + "Z",
+            corpus_version="corpus-v1",
+            system_version="v1",
+            top_k=5,
+            languages=(eng,),
+            unavailable_languages=(hi,),
+            english_baseline=eng,
+        )
+        lines = generate_multilingual_jsonl(report)
+        # Should have 2 lines for English (hit + recall) + 2 lines for Hindi (unavailable hit + recall)
+        self.assertEqual(len(lines), 4)
+        hi_lines = [json.loads(l) for l in lines if json.loads(l)["language"] == "hi"]
+        self.assertEqual(len(hi_lines), 2)
+        for hl in hi_lines:
+            self.assertTrue(hl["unavailable"])
+            self.assertIsNone(hl["value"])
+            self.assertIn("unavailable_reason", hl)
+
+    def test_markdown_shows_unavailable(self):
+        from kisansathi.evaluation.multilingual import LanguageMetrics, MultilingualReport
+        from datetime import datetime
+        from kisansathi.evaluation.report import generate_multilingual_markdown
+
+        eng = LanguageMetrics(
+            language=Language.ENGLISH,
+            dataset_version="retrieval-en-v1",
+            corpus_version="corpus-v1",
+            query_count=10,
+            systems={"SystemA": {"hit_rate_at_k": 0.9, "recall_at_k": 0.85}},
+        )
+        hi = LanguageMetrics(
+            language=Language.HINDI,
+            dataset_version="retrieval-hi-v1",
+            corpus_version="corpus-v1",
+            query_count=0,
+            systems={},
+            unavailable=True,
+            unavailable_reason="No genuine Hindi labels",
+        )
+        report = MultilingualReport(
+            evaluation_timestamp_utc=datetime.utcnow().isoformat() + "Z",
+            corpus_version="corpus-v1",
+            system_version="v1",
+            top_k=5,
+            languages=(eng,),
+            unavailable_languages=(hi,),
+            english_baseline=eng,
+        )
+        md = generate_multilingual_markdown(report)
+        self.assertIn("UNAVAILABLE", md)
+        self.assertIn("No genuine Hindi labels", md)
+        self.assertIn("No multilingual retrieval metric is reported until genuine relevance labels exist for that language", md)
+
+
+class TestEnglishBenchmarkCompatibility(unittest.TestCase):
+    """Tests to ensure English benchmark continues to work unchanged."""
+
+    def test_english_benchmark_loads(self):
+        dataset = load_retrieval_dataset("data/evaluation/retrieval_en_v1.json")
+        self.assertEqual(dataset.evaluation_set_version, "retrieval-en-v1")
+        self.assertEqual(len(dataset.examples), 10)
+        self.assertFalse(dataset.unavailable)
+
+    def test_english_benchmark_evaluation(self):
+        retriever = FakeRetriever({})
+        # Just verify it runs without error - we don't have real retriever here
+        dataset = load_retrieval_dataset("data/evaluation/retrieval_en_v1.json")
+        self.assertEqual(dataset.language, Language.ENGLISH)
+
+    def test_legacy_relevant_chunk_ids_supported(self):
+        # The loader supports both 'relevant_chunk_ids' (legacy) and 'expected_chunk_ids' (new)
+        import tempfile
+        import json
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as f:
+            json.dump({
+                "evaluation_set_version": "test-v1",
+                "corpus_version": "corpus-v1",
+                "examples": [
+                    {"query": "test", "relevant_chunk_ids": ["c1"]}  # legacy key
+                ]
+            }, f)
+            path = f.name
+        try:
+            dataset = load_retrieval_dataset(path)
+            self.assertEqual(len(dataset.examples), 1)
+            self.assertEqual(dataset.examples[0].expected_chunk_ids, ("c1",))
+        finally:
+            import os
+            os.unlink(path)
 
 
 if __name__ == "__main__":
