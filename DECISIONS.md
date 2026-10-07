@@ -154,10 +154,57 @@ esolve_evidence_batch collect refusals in a CitationBatch instead of raising, so
 
 **Trade-off:** The eligibility route cannot answer from free text, so a keyword-matched question with no structured facts always asks for clarification instead of producing a verdict; regex-parsing facts out of the message was rejected as unsafe. Eligibility intent is a provisional keyword set on the same footing as the existing weather keywords, so phrasings outside that set still route to retrieval. The scheme defaults to the single implemented rule set, since there is no scheme classifier yet. All-refused provenance yields ABSTAINED, so a stale or corrupt index looks like an unhelpful assistant rather than a wrongly-citing one, and CitationBatch.rejected is currently computed and then discarded. An empty batch with no rejections is ambiguous between "resolution not configured" and "nothing to cite"; the graph reads it as unconfigured so the original un-cited behaviour is preserved, which means a genuinely empty-but-refused retrieval would not abstain. Gate 2 (validate_referenced_citations) still has no caller because no answer generator exists, and citations remain page-level with no claim-level linkage. validate_referenced_citations and the resolver were already covered by unit tests, so this milestone adds graph-level integration tests only.
 
-## 2026-10-06: LLM answer generation with grounded citations
+## 2026-10-07: Add injectable vision analysis with Gemini provider
 
-**Decision:** Add a `generation` package with an injectable `AnswerGenerator` protocol and `DefaultAnswerGenerator` implementation. The LangGraph orchestration gains a `generate_answer` node (after `resolve_citations`) and a `validate_and_attach_citations` node, wired only on the retrieval and eligibility paths. `build_graph` accepts a new keyword-only `answer_generator` parameter; when absent, routes behave exactly as before with deterministic placeholder responses and resolver citations attached. The generator receives a `GenerationContext` containing the user message, resolved `CitationBatch`, eligibility decision, and weather. The prompt explicitly forbids external knowledge, requires inline citation IDs from an allowlist, and demands the requested language. Model output is parsed as `ANSWER:` / `CITATIONS:` sections; cited IDs are validated against the resolved batch, then re-validated post-generation via `validate_referenced_citations`. LLM failures yield `ABSTAINED` with a non-empty message; malformed output or hallucinated citation IDs yield `NEEDS_CLARIFICATION`. Weather and clarification routes bypass generation entirely. No LLM provider is hard-coded; tests use a `FakeLLMClient` and `FakeAnswerGenerator`.
+**Decision:** Add `kisansathi.vision` with an injectable `VisionAnalyzer` protocol, `VisionResult`/`VisualObservation` domain models, image validation, and a `GeminiVisionAnalyzer` implementation. All normal tests use `FakeVisionAnalyzer`; the real provider is in `kisansathi.vision.providers`.
 
-**Reason:** The LLM must be a replaceable infrastructure dependency, not a domain dependency. Converging both evidence routes on one generation node keeps prompt logic and citation validation in one place. Fail-closed behaviour extends to generation: any citation not in the resolved batch is rejected, and LLM errors never fabricate citations. The generator returns a structured `GeneratedAnswer` so the graph can validate citations before constructing the final `AssistantResponse`. Weather and clarification carry no document evidence, so they skip generation and preserve their existing behaviour.
+**Architecture:**
+- Domain layer (`vision.models`, `vision.image`) depends only on the `VisionAnalyzer` protocol
+- Infrastructure layer (`vision.providers`) implements `GeminiVisionAnalyzer` behind the protocol
+- Factory `create_vision_analyzer(settings)` returns configured provider (fake or Gemini)
+- LangGraph `build_graph` accepts optional `vision_analyzer` keyword argument; when provided, image input is analyzed before routing
 
-**Trade-off:** The generator cannot verify factual correctness, only citation provenance; a model could cite a real source for an unsupported claim. Gate 2 catches invented citation IDs but not unsupported claims. Temperature is fixed at 0.0 for determinism; no streaming, tool use, or multi-turn conversation is supported. The prompt includes only metadata and short excerpts, not full chunk text, limiting context but reducing prompt-injection surface. Hindi language is supported via the system prompt; other languages fall back to English. The resolver never reads chunk text, so OCR damage in the corpus is never repaired en route to a citation.
+**Provider behavior:**
+- Image validation (MIME, magic bytes, size ≤10MB, dimensions ≤8192px, ≤50MP) runs BEFORE any provider call
+- Tightly constrained system prompt demands structured JSON: observations with label, category (crop/disease/pest/stress/healthy/other), confidence (0-1), description
+- Explicit uncertainty language required: "symptoms consistent with", "possibly", confidence scores
+- Provider response validated against `VisionResult` schema before returning downstream
+- Provider errors mapped to domain exceptions: `AnalyzerUnavailableError`, `AnalyzerTimeoutError`, `ImageValidationError`, `UnsupportedFormatError`, `ImageTooLargeError`
+- Retry ONLY transient failures (429 rate limit, 5xx server errors, timeout); NEVER retry auth (401/403), bad request (400), or malformed output
+- Exponential backoff (base 1s, max 2 retries) with jitter
+
+**Observability (no secrets):**
+- Structured logs: provider, model, latency_ms, status, observations_count, max_confidence, retry_count
+- NEVER logged: API keys, raw image bytes, full request/response payloads
+
+**Privacy:**
+- Image bytes held in-memory only during request; discarded immediately after parsing response
+- No disk persistence of images
+- Gemini API policy: "Google does not use your API data to train models"
+
+**Retrieval interaction:**
+- Vision observations (confidence ≥0.5) augment retrieval query via `format_for_retrieval()`
+- Existing hybrid retrieval (RRF) and reranker unchanged
+- Vision output is an OBSERVATION, not evidence — never bypasses document grounding
+- Final answers cite only retrieved documents; vision observations formatted with uncertainty markers in generation context
+
+**Testing:**
+- Normal CI: `FakeVisionAnalyzer` only, 600+ tests, zero network calls, no API keys
+- Contract tests (manual): `tests/contract/test_gemini_vision_contract.py` skipped unless `RUN_REAL_VISION_TESTS=1` and `GEMINI_API_KEY` set
+- Unit tests for: response parsing, malformed JSON, schema validation, confidence clamping, auth failure, rate limit, timeout, retry logic, oversized image, format rejection
+
+**Configuration:**
+- `KISANSAATHI_VISION_PROVIDER` (fake|gemini, default fake)
+- `KISANSAATHI_VISION_API_KEY` (required for gemini)
+- `KISANSAATHI_VISION_MODEL_NAME` (default gemini-1.5-flash-latest)
+- `KISANSAATHI_VISION_TIMEOUT_SECONDS` (default 15.0)
+- `KISANSAATHI_VISION_CONNECT_TIMEOUT_SECONDS` (default 5.0)
+- `KISANSAATHI_VISION_MAX_RETRIES` (default 2)
+- `KISANSAATHI_VISION_RETRY_BACKOFF_BASE` (default 1.0)
+- `KISANSAATHI_VISION_MAX_IMAGE_BYTES` (default 10MB)
+- `KISANSAATHI_VISION_TEMPERATURE` (default 0.0)
+- `KISANSAATHI_VISION_MAX_OUTPUT_TOKENS` (default 1024)
+
+**Reason:** Vision must be a replaceable infrastructure dependency. The protocol keeps domain pure and testable. Hosted multimodal LLM (Gemini) is the pragmatic first choice: zero model ops, multilingual out of box, structured output support, pay-per-use. Specialized classifier or local VLM can be swapped later without domain changes. Vision output is explicitly uncertain and never used as authoritative evidence — it only augments retrieval queries.
+
+**Trade-off:** Generalist model accuracy on rare crops/diseases is moderate; mitigated by uncertainty framing, confidence thresholds, and mandatory document grounding. Cost: ~$0.0001/image (Gemini 1.5 Flash). Latency: ~1.5s. No offline mode in MVP (fake provider for tests only). No custom crop-disease dataset or training in this milestone.

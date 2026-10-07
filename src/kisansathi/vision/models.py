@@ -69,7 +69,8 @@ class VisionResult:
             raise TypeError("observations must be a tuple")
         if self.status == VisionStatus.SUCCESS and not self.observations:
             raise ValueError("SUCCESS status requires at least one observation")
-        if self.status != VisionStatus.SUCCESS and self.observations:
+        # LOW_CONFIDENCE and UNABLE_TO_ANALYZE are clarification statuses that may have observations
+        if self.status not in (VisionStatus.SUCCESS, VisionStatus.LOW_CONFIDENCE, VisionStatus.UNABLE_TO_ANALYZE) and self.observations:
             raise ValueError("Failed status must have empty observations")
         if not (0.0 <= self.confidence_overall <= 1.0):
             raise ValueError("confidence_overall must be between 0.0 and 1.0")
