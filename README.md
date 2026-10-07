@@ -116,3 +116,49 @@ A `kisansathi.vision` package provides an injectable `VisionAnalyzer` protocol. 
 ## Answer generation (new)
 
 A `kisansathi.generation` package provides an injectable `AnswerGenerator` protocol with a `DefaultAnswerGenerator` implementation. The LangGraph orchestration adds a `generate_answer` node (after `resolve_citations`) and a `validate_and_attach_citations` node on the retrieval and eligibility paths. `build_graph` accepts a keyword-only `answer_generator` parameter; when absent, routes behave exactly as before with deterministic placeholder responses. The generator receives a `GenerationContext` (message, resolved `CitationBatch`, eligibility decision, weather, vision_result) and returns a structured `GeneratedAnswer`. The prompt explicitly forbids external knowledge, requires inline citation IDs from an allowlist, and demands the requested language. Model output is parsed as `ANSWER:` / `CITATIONS:` sections; cited IDs are validated against the resolved batch, then re-validated post-generation via `validate_referenced_citations`. LLM failures yield `ABSTAINED`; malformed output or hallucinated citation IDs yield `NEEDS_CLARIFICATION`. Weather and clarification routes bypass generation entirely. No LLM provider is hard-coded; tests use a `FakeLLMClient` and `FakeAnswerGenerator`.
+
+## Answer quality evaluation (new)
+
+A `kisansathi.evaluation.answer_quality` module provides **semantic answer quality metrics** using an LLM judge (RAGAS-compatible adapter). This is **separate from deterministic checks** in `kisansathi.evaluation.answer` and **opt-in only** — it does not run as part of normal pytest.
+
+### Metrics
+
+- **Faithfulness**: Does the generated answer stay faithful to retrieved contexts?
+- **Answer Relevance**: Is the answer relevant to the query?
+- **Context Precision**: Are retrieved contexts relevant (vs reference contexts)?
+- **Context Recall**: Do retrieved contexts cover reference contexts? (Only when reference contexts exist)
+
+### Architecture
+
+- **Provider-agnostic `LLMJudge` protocol** — inject any LLM provider; `FakeLLMJudge` for deterministic tests
+- **Prompt-injection safe** — evaluation prompts explicitly forbid following instructions in retrieved/generated content
+- **Missing-input handling** — metrics unavailable when required inputs missing; no fake scores substituted
+- **Reproducibility metadata** — records benchmark version, judge provider/model, temperature, timestamp, config
+- **No API keys in logs/reports**
+
+### Benchmark
+
+Hand-authored English dataset: `data/evaluation/answer_quality/answer_quality_en_v1.json` (5 cases, tied to corpus checksums). No multilingual answer-quality labels fabricated — Hindi/Kannada/Telugu not reported without real labels.
+
+### CLI (opt-in)
+
+```powershell
+python -m kisansathi.evaluation.main answer-quality ^
+  --dataset data/evaluation/answer_quality/answer_quality_en_v1.json ^
+  --output-jsonl output/answer_quality.jsonl ^
+  --output-markdown output/answer_quality.md
+```
+
+Uses `FakeLLMJudge` by default (no API calls). Real judges implemented programmatically via `LLMJudge` protocol.
+
+### Reports
+
+- **Machine-readable JSONL** — one line per metric with judge metadata
+- **Human-readable Markdown** — summary table, per-case breakdown, limitations section
+
+### Limitations
+
+- Judge bias/variance affects scores
+- No confidence intervals or statistical significance
+- Results not comparable across different judge providers/models/configurations
+- Context precision/recall require reference contexts (unavailable when missing)

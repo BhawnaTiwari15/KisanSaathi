@@ -1,6 +1,7 @@
 """Evaluation command-line interface."""
 
 import argparse
+import asyncio
 import json
 import sys
 from contextlib import ExitStack
@@ -8,13 +9,21 @@ from pathlib import Path
 from typing import Any
 
 from kisansathi.config import Settings
-from kisansathi.evaluation.retrieval import RetrievalEvaluationResult, evaluate_systems
-from kisansathi.evaluation.schemas import load_retrieval_dataset
+from kisansathi.evaluation.answer_quality import (
+    AnswerQualityEvaluationSummary,
+    FakeLLMJudge,
+    JudgeConfig,
+    evaluate_answer_quality_dataset,
+)
 from kisansathi.evaluation.report import (
+    generate_answer_quality_jsonl,
+    generate_answer_quality_markdown,
     generate_retrieval_jsonl,
     generate_retrieval_markdown,
     write_jsonl,
 )
+from kisansathi.evaluation.retrieval import RetrievalEvaluationResult, evaluate_systems
+from kisansathi.evaluation.schemas import load_answer_quality_dataset, load_retrieval_dataset
 from kisansathi.retrieval.bm25_retriever import BM25Retriever
 from kisansathi.retrieval.bm25_store import BM25Store
 from kisansathi.retrieval.embeddings import EmbeddingService
@@ -130,6 +139,85 @@ def run_multilingual_evaluation(
     # Print summary
     print(print_multilingual_summary(report))
     return report
+
+
+def run_answer_quality_evaluation(
+    dataset_path: str,
+    output_jsonl: str | None = None,
+    output_markdown: str | None = None,
+    system_version: str = "",
+    judge_provider: str = "fake",
+    judge_model: str = "fake-model",
+    temperature: float = 0.0,
+    max_tokens: int = 1024,
+) -> AnswerQualityEvaluationSummary:
+    """Run semantic answer quality evaluation (LLM judge) and optionally write reports.
+
+    This is an OPT-IN command that requires an LLM judge.
+    By default, it uses a FakeLLMJudge for testing without API calls.
+    To use a real judge, implement the LLMJudge protocol and pass it programmatically.
+
+    Args:
+        dataset_path: Path to answer quality evaluation dataset
+        output_jsonl: Optional path to write JSONL results
+        output_markdown: Optional path to write Markdown report
+        system_version: System version identifier
+        judge_provider: Judge provider name (default: "fake" for testing)
+        judge_model: Judge model name (default: "fake-model")
+        temperature: Judge temperature (default: 0.0)
+        max_tokens: Judge max tokens (default: 1024)
+
+    Returns:
+        AnswerQualityEvaluationSummary with all metric results
+    """
+    dataset = load_answer_quality_dataset(dataset_path)
+
+    # Use fake judge by default - real judge implementations should be injected programmatically
+    if judge_provider == "fake":
+        judge = FakeLLMJudge()
+        print("NOTICE: Using FakeLLMJudge for testing. No real LLM calls made.", file=sys.stderr)
+        print("To use a real judge, implement LLMJudge protocol and call evaluate_answer_quality_dataset programmatically.", file=sys.stderr)
+    else:
+        raise ValueError(
+            f"Unknown judge provider: {judge_provider}. "
+            "Real judge providers must be implemented programmatically via the LLMJudge protocol. "
+            "This CLI only supports 'fake' for deterministic testing."
+        )
+
+    config = JudgeConfig(
+        provider_name=judge_provider,
+        model_name=judge_model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+
+    # Run evaluation
+    summary = asyncio.run(evaluate_answer_quality_dataset(
+        dataset=dataset,
+        judge=judge,
+        config=config,
+        system_version=system_version,
+    ))
+
+    # Write reports
+    if output_jsonl:
+        write_jsonl(generate_answer_quality_jsonl(summary), output_jsonl)
+    if output_markdown:
+        with open(output_markdown, "w", encoding="utf-8") as f:
+            f.write(generate_answer_quality_markdown(summary))
+
+    # Print summary to stdout
+    print(json.dumps({
+        "benchmark_version": summary.benchmark_version,
+        "corpus_version": summary.corpus_version,
+        "system_version": summary.system_version,
+        "total_cases": summary.total_cases,
+        "metrics_summary": summary.metrics_summary,
+        "judge_metadata": summary.judge_metadata.to_dict(),
+        "timestamp_utc": summary.timestamp_utc,
+    }, ensure_ascii=False, indent=2))
+
+    return summary
 
 
 def main() -> int:
@@ -265,6 +353,58 @@ def main() -> int:
         help="Note about this command",
     )
 
+    # Answer quality evaluation (semantic/LLM-judge) - OPT-IN
+    answer_quality_parser = subparsers.add_parser(
+        "answer-quality",
+        help="Run semantic answer quality evaluation (LLM judge) - OPT-IN, requires judge provider"
+    )
+    answer_quality_parser.add_argument(
+        "--dataset",
+        default="data/evaluation/answer_quality/answer_quality_en_v1.json",
+        help="Path to answer quality evaluation dataset",
+    )
+    answer_quality_parser.add_argument(
+        "--output-jsonl",
+        help="Path to write JSONL results",
+    )
+    answer_quality_parser.add_argument(
+        "--output-markdown",
+        help="Path to write Markdown report",
+    )
+    answer_quality_parser.add_argument(
+        "--system-version",
+        default="",
+        help="System version identifier",
+    )
+    answer_quality_parser.add_argument(
+        "--judge-provider",
+        default="fake",
+        choices=["fake"],
+        help="Judge provider (only 'fake' supported in CLI; real providers via programmatic API)",
+    )
+    answer_quality_parser.add_argument(
+        "--judge-model",
+        default="fake-model",
+        help="Judge model name",
+    )
+    answer_quality_parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.0,
+        help="Judge temperature",
+    )
+    answer_quality_parser.add_argument(
+        "--max-tokens",
+        type=int,
+        default=1024,
+        help="Judge max tokens",
+    )
+    answer_quality_parser.add_argument(
+        "--note",
+        default="OPT-IN: This command runs LLM-judge semantic evaluation. Default uses FakeLLMJudge (no API calls). Real judges require programmatic implementation.",
+        help="Note about this command",
+    )
+
     args = parser.parse_args()
 
     try:
@@ -285,6 +425,19 @@ def main() -> int:
                 output_markdown=args.output_markdown,
                 k=args.k,
                 system_version=args.system_version,
+            )
+            return 0
+
+        elif args.command == "answer-quality":
+            run_answer_quality_evaluation(
+                dataset_path=args.dataset,
+                output_jsonl=args.output_jsonl,
+                output_markdown=args.output_markdown,
+                system_version=args.system_version,
+                judge_provider=args.judge_provider,
+                judge_model=args.judge_model,
+                temperature=args.temperature,
+                max_tokens=args.max_tokens,
             )
             return 0
 

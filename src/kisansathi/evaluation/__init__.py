@@ -20,9 +20,12 @@ from kisansathi.evaluation.schemas import (
     AnswerDataset,
     SafetyExample,
     SafetyDataset,
+    AnswerQualityEvaluationCase,
+    AnswerQualityEvaluationDataset,
     load_retrieval_dataset,
     load_answer_dataset,
     load_safety_dataset,
+    load_answer_quality_dataset,
 )
 from kisansathi.evaluation.retrieval import (
     RetrievalEvaluationResult,
@@ -30,6 +33,22 @@ from kisansathi.evaluation.retrieval import (
     QueryMetrics,
     evaluate_retriever,
     evaluate_systems as evaluate_retrieval_systems,
+)
+from kisansathi.evaluation.answer_quality import (
+    AnswerQualityMetricResult,
+    AnswerQualityEvaluationResult,
+    AnswerQualityEvaluationSummary,
+    JudgeConfig,
+    JudgeMetadata,
+    JudgeStatus,
+    LLMJudge,
+    FakeLLMJudge,
+    evaluate_answer_quality_semantic,
+    evaluate_answer_quality_dataset,
+    FAITHFULNESS_PROMPT,
+    ANSWER_RELEVANCE_PROMPT,
+    CONTEXT_PRECISION_PROMPT,
+    CONTEXT_RECALL_PROMPT,
 )
 from kisansathi.evaluation.answer import (
     AnswerQualityResult,
@@ -69,6 +88,8 @@ from kisansathi.evaluation.report import (
     generate_citation_markdown,
     generate_multilingual_jsonl,
     generate_multilingual_markdown,
+    generate_answer_quality_jsonl,
+    generate_answer_quality_markdown,
     write_jsonl,
 )
 
@@ -92,21 +113,39 @@ __all__ = [
     "AnswerDataset",
     "SafetyExample",
     "SafetyDataset",
+    "AnswerQualityEvaluationCase",
+    "AnswerQualityEvaluationDataset",
     "load_retrieval_dataset",
     "load_answer_dataset",
     "load_safety_dataset",
+    "load_answer_quality_dataset",
     # Retrieval
     "RetrievalEvaluationResult",
     "SystemMetrics",
     "QueryMetrics",
     "evaluate_retriever",
     "evaluate_retrieval_systems",
-    # Answer quality
+    # Answer quality (deterministic)
     "AnswerQualityResult",
     "AnswerQualityCheck",
     "AnswerEvaluationSummary",
     "evaluate_answer_quality",
     "evaluate_answer_dataset",
+    # Answer quality (semantic/LLM-judge)
+    "AnswerQualityMetricResult",
+    "AnswerQualityEvaluationResult",
+    "AnswerQualityEvaluationSummary",
+    "JudgeConfig",
+    "JudgeMetadata",
+    "JudgeStatus",
+    "LLMJudge",
+    "FakeLLMJudge",
+    "evaluate_answer_quality_semantic",
+    "evaluate_answer_quality_dataset",
+    "FAITHFULNESS_PROMPT",
+    "ANSWER_RELEVANCE_PROMPT",
+    "CONTEXT_PRECISION_PROMPT",
+    "CONTEXT_RECALL_PROMPT",
     # Refusal
     "RefusalResult",
     "RefusalEvaluationSummary",
@@ -135,5 +174,7 @@ __all__ = [
     "generate_citation_markdown",
     "generate_multilingual_jsonl",
     "generate_multilingual_markdown",
+    "generate_answer_quality_jsonl",
+    "generate_answer_quality_markdown",
     "write_jsonl",
 ]

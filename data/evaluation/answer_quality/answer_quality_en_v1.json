@@ -1,0 +1,97 @@
+{
+  "benchmark_version": "answer-quality-en-v1",
+  "corpus_version": "processed-v1:pm-kisan-revised-faq@95d4e2892b4b351e599bf903f8c6f89b20d4b74831eb8f1a0e61a2a66771ff86;mh-pdmc-notification-2026-27@963dacb1c00d88ff163a20968a62943e1652aa27d74249ebf9f9d1690a54afcf",
+  "system_version": "kisansathi-0.1.0",
+  "examples": [
+    {
+      "case_id": "aq-en-001",
+      "query": "What is the PM-KISAN payment amount and frequency?",
+      "language": "en",
+      "retrieved_contexts": [
+        "PM-KISAN provides income support of Rs. 6000 per year to eligible farmer families. The amount is paid in three equal installments of Rs. 2000 each, every four months.",
+        "The scheme was launched on 24th February 2019 and took effect from 1st December 2018. The first installment was for the period December 2018 to March 2019."
+      ],
+      "generated_answer": "PM-KISAN provides Rs. 6000 per year, paid in three installments of Rs. 2000 each every four months.",
+      "citation_ids": ["pm-kisan-revised-faq:75ee388fe9c50b9419d6aea2", "pm-kisan-revised-faq:253f2217c855d17c2dfdf2dd"],
+      "reference_answer": "PM-KISAN provides income support of Rs. 6000 per year in three equal installments of Rs. 2000 each, paid every four months.",
+      "reference_contexts": [
+        "PM-KISAN provides income support of Rs. 6000 per year to eligible farmer families. The amount is paid in three equal installments of Rs. 2000 each, every four months."
+      ],
+      "expected_response_status": "answered",
+      "benchmark_version": "answer-quality-en-v1"
+    },
+    {
+      "case_id": "aq-en-002",
+      "query": "Which categories of people are excluded from PM-KISAN benefits?",
+      "language": "en",
+      "retrieved_contexts": [
+        "Institutional land holders are excluded from PM-KISAN benefits.",
+        "Farmer families where one or more members belong to certain categories are excluded: (i) Former and present holders of constitutional posts, (ii) Former and present Ministers/State Ministers, (iii) Former/present Members of Lok Sabha/Rajya Sabha/State Legislative Assemblies/Councils, (iv) Former/present Mayors of Municipal Corporations, (v) Former/present Chairpersons of District Panchayats, (vi) Serving or retired officers and employees of Central/State Government Ministries/Offices/Departments and their field units, (vii) All superannuated/retired pensioners whose monthly pension is Rs. 10,000 or more, (viii) Persons who paid income tax in last assessment year, (ix) Professionals like doctors, engineers, lawyers, chartered accountants, and architects registered with professional bodies.",
+        "The scheme is for small and marginal farmer families. There is no landholding size limit for eligibility."
+      ],
+      "generated_answer": "PM-KISAN excludes institutional land holders and farmer families with members who are: constitutional post holders, ministers, MPs/MLAs, mayors, district panchayat chairs, government employees, pensioners with monthly pension over Rs. 10,000, income tax payers, and registered professionals like doctors, engineers, lawyers, CAs, and architects.",
+      "citation_ids": ["pm-kisan-revised-faq:16cfad383d6c894338931f62", "pm-kisan-revised-faq:56b08d8aa185e49141da6d74", "pm-kisan-revised-faq:2312d143e86c2d0f5364b87b"],
+      "reference_answer": "Excluded categories include: institutional land holders, constitutional post holders, ministers, parliamentarians/legislators, mayors, district panchayat chairs, government employees, pensioners with Rs. 10,000+ monthly pension, income tax payers, and registered professionals (doctors, engineers, lawyers, CAs, architects).",
+      "reference_contexts": [
+        "Institutional land holders are excluded from PM-KISAN benefits.",
+        "Farmer families where one or more members belong to certain categories are excluded: (i) Former and present holders of constitutional posts, (ii) Former and present Ministers/State Ministers, (iii) Former/present Members of Lok Sabha/Rajya Sabha/State Legislative Assemblies/Councils, (iv) Former/present Mayors of Municipal Corporations, (v) Former/present Chairpersons of District Panchayats, (vi) Serving or retired officers and employees of Central/State Government Ministries/Offices/Departments and their field units, (vii) All superannuated/retired pensioners whose monthly pension is Rs. 10,000 or more, (viii) Persons who paid income tax in last assessment year, (ix) Professionals like doctors, engineers, lawyers, chartered accountants, and architects registered with professional bodies."
+      ],
+      "expected_response_status": "answered",
+      "benchmark_version": "answer-quality-en-v1"
+    },
+    {
+      "case_id": "aq-en-003",
+      "query": "Can farmers with more than two hectares receive PM-KISAN benefits?",
+      "language": "en",
+      "retrieved_contexts": [
+        "The scheme is for small and marginal farmer families. There is no landholding size limit for eligibility. The two-hectare limit was removed in 2019.",
+        "Initially PM-KISAN was limited to small and marginal farmers with up to 2 hectares of land. This restriction was removed with effect from 1st June 2019, making all farmer families eligible regardless of landholding size, subject to other exclusion criteria."
+      ],
+      "generated_answer": "Yes, farmers with more than two hectares can receive PM-KISAN benefits. The two-hectare limit was removed in June 2019. All farmer families are eligible regardless of landholding size, subject to exclusion criteria.",
+      "citation_ids": ["pm-kisan-revised-faq:243b03dc90dece3b3146d967", "pm-kisan-revised-faq:243b03dc90dece3b3146d967"],
+      "reference_answer": "Yes, there is no landholding size limit. The two-hectare restriction was removed effective 1st June 2019. All farmer families are eligible regardless of land size, subject to other exclusion criteria.",
+      "reference_contexts": [
+        "The scheme is for small and marginal farmer families. There is no landholding size limit for eligibility. The two-hectare limit was removed in 2019.",
+        "Initially PM-KISAN was limited to small and marginal farmers with up to 2 hectares of land. This restriction was removed with effect from 1st June 2019, making all farmer families eligible regardless of landholding size, subject to other exclusion criteria."
+      ],
+      "expected_response_status": "answered",
+      "benchmark_version": "answer-quality-en-v1"
+    },
+    {
+      "case_id": "aq-en-004",
+      "query": "What is the Maharashtra PDMC micro-irrigation scheme subsidy amount?",
+      "language": "en",
+      "retrieved_contexts": [
+        "The Maharashtra PDMC (Per Drop More Crop) micro-irrigation scheme provides subsidies for drip and sprinkler irrigation systems. The subsidy pattern varies by farmer category and system type.",
+        "For small and marginal farmers, the subsidy is 55% of the indicative cost. For other farmers, the subsidy is 45% of the indicative cost. The maximum permissible area is 5 hectares per beneficiary."
+      ],
+      "generated_answer": "The Maharashtra PDMC micro-irrigation scheme provides 55% subsidy for small/marginal farmers and 45% for other farmers, up to 5 hectares per beneficiary.",
+      "citation_ids": ["mh-pdmc-notification-2026-27:9ef55eed1fd6c6517bc0f081", "mh-pdmc-notification-2026-27:0acc966119bab61c3eef68be"],
+      "reference_answer": "Subsidy is 55% of indicative cost for small and marginal farmers, 45% for other farmers, with a maximum area of 5 hectares per beneficiary.",
+      "reference_contexts": [
+        "The Maharashtra PDMC (Per Drop More Crop) micro-irrigation scheme provides subsidies for drip and sprinkler irrigation systems. The subsidy pattern varies by farmer category and system type.",
+        "For small and marginal farmers, the subsidy is 55% of the indicative cost. For other farmers, the subsidy is 45% of the indicative cost. The maximum permissible area is 5 hectares per beneficiary."
+      ],
+      "expected_response_status": "answered",
+      "benchmark_version": "answer-quality-en-v1"
+    },
+    {
+      "case_id": "aq-en-005",
+      "query": "How is the micro-irrigation subsidy credited to farmers?",
+      "language": "en",
+      "retrieved_contexts": [
+        "The subsidy amount is directly credited to the farmer's bank account through DBT (Direct Benefit Transfer) after verification of installation by the concerned department.",
+        "Farmers must apply through the online portal. After installation and verification, the subsidy is transferred to the registered bank account."
+      ],
+      "generated_answer": "The micro-irrigation subsidy is directly credited to the farmer's bank account via DBT (Direct Benefit Transfer) after installation verification by the concerned department.",
+      "citation_ids": ["mh-pdmc-notification-2026-27:0acc966119bab61c3eef68be"],
+      "reference_answer": "Subsidy is directly credited to the farmer's bank account through DBT after verification of installation by the concerned department.",
+      "reference_contexts": [
+        "The subsidy amount is directly credited to the farmer's bank account through DBT (Direct Benefit Transfer) after verification of installation by the concerned department.",
+        "Farmers must apply through the online portal. After installation and verification, the subsidy is transferred to the registered bank account."
+      ],
+      "expected_response_status": "answered",
+      "benchmark_version": "answer-quality-en-v1"
+    }
+  ]
+}

@@ -10,6 +10,7 @@ from kisansathi.evaluation.multilingual import MultilingualReport
 from kisansathi.evaluation.answer import AnswerEvaluationSummary
 from kisansathi.evaluation.refusal import RefusalEvaluationSummary
 from kisansathi.evaluation.citation import CitationEvaluationSummary
+from kisansathi.evaluation.answer_quality import AnswerQualityEvaluationSummary
 
 
 def generate_retrieval_jsonl(result: RetrievalEvaluationResult) -> list[str]:
@@ -139,6 +140,29 @@ def generate_citation_jsonl(summary: CitationEvaluationSummary) -> list[str]:
             "value": rate,
             "timestamp_utc": summary.timestamp_utc,
             "total_responses": summary.total_responses,
+        }))
+    return lines
+
+
+def generate_answer_quality_jsonl(summary: AnswerQualityEvaluationSummary) -> list[str]:
+    """Generate JSONL lines for semantic answer quality evaluation."""
+    lines = []
+    for metric_name, data in summary.metrics_summary.items():
+        lines.append(json_dumps({
+            "benchmark_version": summary.benchmark_version,
+            "corpus_version": summary.corpus_version,
+            "system_version": summary.system_version,
+            "metric": f"answer_quality_{metric_name}_mean",
+            "language": "mixed",  # Per-case language varies
+            "value": data["mean_score"],
+            "timestamp_utc": summary.timestamp_utc,
+            "total_cases": summary.total_cases,
+            "available_count": data["available_count"],
+            "unavailable_count": data["unavailable_count"],
+            "unavailable_reasons": data["unavailable_reasons"],
+            "judge_provider": summary.judge_metadata.judge_provider,
+            "judge_model": summary.judge_metadata.judge_model,
+            "temperature": summary.judge_metadata.temperature,
         }))
     return lines
 
@@ -330,6 +354,73 @@ def generate_citation_markdown(summary: CitationEvaluationSummary) -> str:
 
     for check_name, rate in sorted(summary.per_check_pass_rates.items()):
         lines.append(f"| {check_name} | {rate:.1%} |")
+
+    return "\n".join(lines)
+
+
+def generate_answer_quality_markdown(summary: AnswerQualityEvaluationSummary) -> str:
+    """Generate human-readable Markdown report for semantic answer quality evaluation."""
+    lines = [
+        "# Semantic Answer Quality Evaluation Report (LLM Judge)",
+        "",
+        f"**Benchmark Version:** {summary.benchmark_version}",
+        f"**Corpus Version:** {summary.corpus_version}",
+        f"**System Version:** {summary.system_version or 'unknown'}",
+        f"**Timestamp (UTC):** {summary.timestamp_utc}",
+        "",
+        "## Judge Metadata",
+        "",
+        f"- **Provider:** {summary.judge_metadata.judge_provider}",
+        f"- **Model:** {summary.judge_metadata.judge_model}",
+        f"- **Temperature:** {summary.judge_metadata.temperature}",
+        f"- **Config:** {json.dumps(summary.judge_metadata.config, ensure_ascii=False)}",
+        "",
+        "## Summary",
+        "",
+        f"- **Total Cases:** {summary.total_cases}",
+        "",
+        "## Metric Scores (mean over available cases)",
+        "",
+        "| Metric | Mean Score | Available | Unavailable | Unavailable Reasons |",
+        "|--------|------------|-----------|-------------|---------------------|",
+    ]
+
+    for metric_name, data in sorted(summary.metrics_summary.items()):
+        reasons = "; ".join(data["unavailable_reasons"]) if data["unavailable_reasons"] else "—"
+        lines.append(
+            f"| {metric_name} | {data['mean_score']:.3f} | "
+            f"{data['available_count']} | {data['unavailable_count']} | {reasons} |"
+        )
+
+    lines.extend([
+        "",
+        "## Per-Case Results",
+        "",
+    ])
+
+    for case in summary.per_case:
+        lines.append(f"### {case.case_id}: {case.query[:80]}")
+        lines.append("")
+        lines.append("| Metric | Score | Status |")
+        lines.append("|--------|-------|--------|")
+        for metric in case.metrics:
+            score_str = f"{metric.score:.3f}" if metric.score is not None else "N/A"
+            lines.append(f"| {metric.metric_name} | {score_str} | {metric.status.value} |")
+            if metric.reason_unavailable:
+                lines.append(f"  - *Reason:* {metric.reason_unavailable}")
+        lines.append(f"  - *Deterministic checks passed:* {case.deterministic_checks_passed}")
+        lines.append("")
+
+    lines.extend([
+        "",
+        "## Limitations",
+        "",
+        "- This evaluation uses an LLM judge and is subject to judge bias and variance.",
+        "- Metrics marked 'unavailable' could not be computed due to missing inputs (e.g., no reference contexts).",
+        "- No confidence intervals or statistical significance tests are performed.",
+        "- Results are not comparable across different judge providers/models/configurations.",
+        "",
+    ])
 
     return "\n".join(lines)
 

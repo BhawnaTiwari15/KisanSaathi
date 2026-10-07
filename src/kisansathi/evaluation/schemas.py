@@ -209,6 +209,143 @@ class SafetyDataset:
             raise ValueError("example ids must be unique")
 
 
+@dataclass(frozen=True, slots=True)
+class AnswerQualityEvaluationCase:
+    """Versioned answer-quality evaluation case for LLM-judge/RAGAS metrics.
+
+    This is separate from AnswerExample (which drives deterministic checks).
+    This case contains all inputs needed for semantic evaluation metrics:
+    - Faithfulness: generated_answer vs retrieved_contexts
+    - Answer Relevance: generated_answer vs query
+    - Context Precision: retrieved_contexts vs reference_contexts (when available)
+    - Context Recall: retrieved_contexts vs reference_contexts (when available)
+
+    All fields are optional except case_id, query, and language to allow
+    partial evaluation when some inputs are unavailable.
+    """
+
+    case_id: str
+    query: str
+    language: Language
+    retrieved_contexts: tuple[str, ...] = ()
+    generated_answer: str = ""
+    citation_ids: tuple[str, ...] = ()
+    reference_answer: str | None = None
+    reference_contexts: tuple[str, ...] = ()
+    expected_response_status: AnswerStatus = AnswerStatus.ANSWERED
+    benchmark_version: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.case_id.strip():
+            raise ValueError("case_id must not be empty")
+        if not self.query.strip():
+            raise ValueError("query must not be empty")
+        if self.reference_answer is not None and not self.reference_answer.strip():
+            raise ValueError("reference_answer must not be empty string if provided")
+        if not self.benchmark_version.strip():
+            raise ValueError("benchmark_version must not be empty")
+
+    @property
+    def has_reference_answer(self) -> bool:
+        """Whether reference answer is available for faithfulness/answer relevance."""
+        return self.reference_answer is not None and bool(self.reference_answer.strip())
+
+    @property
+    def has_reference_contexts(self) -> bool:
+        """Whether reference contexts are available for context precision/recall."""
+        return bool(self.reference_contexts)
+
+    @property
+    def can_compute_faithfulness(self) -> bool:
+        """Faithfulness needs generated_answer and retrieved_contexts."""
+        return bool(self.generated_answer.strip()) and bool(self.retrieved_contexts)
+
+    @property
+    def can_compute_answer_relevance(self) -> bool:
+        """Answer relevance needs generated_answer and query."""
+        return bool(self.generated_answer.strip()) and bool(self.query.strip())
+
+    @property
+    def can_compute_context_precision(self) -> bool:
+        """Context precision needs retrieved_contexts and reference_contexts."""
+        return bool(self.retrieved_contexts) and self.has_reference_contexts
+
+    @property
+    def can_compute_context_recall(self) -> bool:
+        """Context recall needs retrieved_contexts and reference_contexts."""
+        return bool(self.retrieved_contexts) and self.has_reference_contexts
+
+
+@dataclass(frozen=True, slots=True)
+class AnswerQualityEvaluationDataset:
+    """Versioned answer-quality evaluation dataset for LLM-judge metrics."""
+
+    benchmark_version: str
+    corpus_version: str
+    system_version: str = ""
+    examples: tuple[AnswerQualityEvaluationCase, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.benchmark_version.strip():
+            raise ValueError("benchmark_version must not be empty")
+        if not self.corpus_version.strip():
+            raise ValueError("corpus_version must not be empty")
+        if not self.examples:
+            raise ValueError("examples must not be empty")
+        ids = [ex.case_id for ex in self.examples]
+        if len(set(ids)) != len(ids):
+            raise ValueError("case_id values must be unique")
+
+
+def load_answer_quality_dataset(path: str | Path) -> AnswerQualityEvaluationDataset:
+    """Load and validate an answer-quality evaluation dataset from JSON."""
+    path = Path(path)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as error:
+        raise ValueError(f"cannot read evaluation dataset {path}: {error}") from error
+    except json.JSONDecodeError as error:
+        raise ValueError(f"invalid evaluation dataset JSON: {error.msg}") from error
+
+    if not isinstance(raw, dict):
+        raise ValueError("evaluation dataset must be a JSON object")
+
+    examples_data = raw.get("examples")
+    if not isinstance(examples_data, list):
+        raise ValueError("evaluation dataset examples must be a list")
+
+    if not examples_data:
+        raise ValueError("evaluation dataset examples must not be empty")
+
+    examples: list[AnswerQualityEvaluationCase] = []
+    for index, item in enumerate(examples_data):
+        if not isinstance(item, dict):
+            raise ValueError(f"evaluation example {index} must be a JSON object")
+
+        try:
+            examples.append(AnswerQualityEvaluationCase(
+                case_id=item.get("case_id", f"auto-{index}"),
+                query=item["query"],
+                language=Language(item.get("language", "en")),
+                retrieved_contexts=tuple(item.get("retrieved_contexts", [])),
+                generated_answer=item.get("generated_answer", ""),
+                citation_ids=tuple(item.get("citation_ids", [])),
+                reference_answer=item.get("reference_answer") or None,
+                reference_contexts=tuple(item.get("reference_contexts", [])),
+                expected_response_status=AnswerStatus(item.get("expected_response_status", "answered")),
+                benchmark_version=item.get("benchmark_version", raw.get("benchmark_version", "")),
+            ))
+        except (KeyError, ValueError) as error:
+            raise ValueError(f"evaluation example {index} invalid: {error}") from error
+
+    return AnswerQualityEvaluationDataset(
+        benchmark_version=raw["benchmark_version"],
+        corpus_version=raw["corpus_version"],
+        system_version=raw.get("system_version", ""),
+        examples=tuple(examples),
+    )
+
+
 def load_retrieval_dataset(path: str | Path) -> RetrievalDataset:
     """Load and validate a retrieval evaluation dataset from JSON."""
     path = Path(path)

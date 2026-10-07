@@ -1,5 +1,6 @@
 """Tests for evaluation framework."""
 
+import asyncio
 import json
 import unittest
 from dataclasses import replace
@@ -32,6 +33,9 @@ from kisansathi.evaluation.schemas import (
     SafetyExample,
     SafetyDataset,
     load_retrieval_dataset,
+    AnswerQualityEvaluationCase,
+    AnswerQualityEvaluationDataset,
+    load_answer_quality_dataset,
 )
 from kisansathi.evaluation.answer import (
     AnswerQualityResult,
@@ -56,6 +60,27 @@ from kisansathi.evaluation.multilingual import (
 from kisansathi.evaluation.report import (
     generate_retrieval_jsonl,
     generate_retrieval_markdown,
+    generate_answer_quality_jsonl,
+    generate_answer_quality_markdown,
+)
+from kisansathi.evaluation.answer_quality import (
+    AnswerQualityMetricResult,
+    AnswerQualityEvaluationResult,
+    AnswerQualityEvaluationSummary,
+    JudgeConfig,
+    JudgeMetadata,
+    JudgeStatus,
+    FakeLLMJudge,
+    evaluate_answer_quality_semantic,
+    evaluate_answer_quality_dataset,
+    evaluate_faithfulness,
+    evaluate_answer_relevance,
+    evaluate_context_precision,
+    evaluate_context_recall,
+    FAITHFULNESS_PROMPT,
+    ANSWER_RELEVANCE_PROMPT,
+    CONTEXT_PRECISION_PROMPT,
+    CONTEXT_RECALL_PROMPT,
 )
 from kisansathi.retrieval.vector_store import SearchResult
 from kisansathi.vision.models import VisionResult, VisionStatus, VisualObservation
@@ -628,6 +653,578 @@ class TestReportGeneration(unittest.TestCase):
         self.assertIn(Language.HINDI, datasets)
         self.assertIn(Language.KANNADA, datasets)
         self.assertIn(Language.TELUGU, datasets)
+
+
+class TestAnswerQualityEvaluationCase(unittest.TestCase):
+    """Tests for AnswerQualityEvaluationCase schema validation."""
+
+    def test_valid_case_all_fields(self):
+        case = AnswerQualityEvaluationCase(
+            case_id="test-001",
+            query="What is PM-KISAN?",
+            language=Language.ENGLISH,
+            retrieved_contexts=("context1", "context2"),
+            generated_answer="PM-KISAN is a scheme.",
+            citation_ids=("cite1",),
+            reference_answer="PM-KISAN provides income support.",
+            reference_contexts=("reference context1",),
+            expected_response_status=AnswerStatus.ANSWERED,
+            benchmark_version="test-v1",
+        )
+        self.assertEqual(case.case_id, "test-001")
+        self.assertTrue(case.has_reference_answer)
+        self.assertTrue(case.has_reference_contexts)
+        self.assertTrue(case.can_compute_faithfulness)
+        self.assertTrue(case.can_compute_answer_relevance)
+        self.assertTrue(case.can_compute_context_precision)
+        self.assertTrue(case.can_compute_context_recall)
+
+    def test_valid_case_minimal_fields(self):
+        case = AnswerQualityEvaluationCase(
+            case_id="test-002",
+            query="What is PM-KISAN?",
+            language=Language.ENGLISH,
+            benchmark_version="test-v1",
+        )
+        self.assertEqual(case.generated_answer, "")
+        self.assertEqual(case.retrieved_contexts, ())
+        self.assertFalse(case.has_reference_answer)
+        self.assertFalse(case.has_reference_contexts)
+        self.assertFalse(case.can_compute_faithfulness)
+        self.assertFalse(case.can_compute_answer_relevance)
+        self.assertFalse(case.can_compute_context_precision)
+        self.assertFalse(case.can_compute_context_recall)
+
+    def test_empty_case_id_fails(self):
+        with self.assertRaises(ValueError):
+            AnswerQualityEvaluationCase(
+                case_id="",
+                query="test",
+                language=Language.ENGLISH,
+                benchmark_version="test-v1",
+            )
+
+    def test_empty_query_fails(self):
+        with self.assertRaises(ValueError):
+            AnswerQualityEvaluationCase(
+                case_id="test-001",
+                query="",
+                language=Language.ENGLISH,
+                benchmark_version="test-v1",
+            )
+
+    def test_empty_benchmark_version_fails(self):
+        with self.assertRaises(ValueError):
+            AnswerQualityEvaluationCase(
+                case_id="test-001",
+                query="test",
+                language=Language.ENGLISH,
+                benchmark_version="",
+            )
+
+    def test_empty_reference_answer_fails(self):
+        with self.assertRaises(ValueError):
+            AnswerQualityEvaluationCase(
+                case_id="test-001",
+                query="test",
+                language=Language.ENGLISH,
+                reference_answer="",
+                benchmark_version="test-v1",
+            )
+
+    def test_none_reference_answer_allowed(self):
+        case = AnswerQualityEvaluationCase(
+            case_id="test-001",
+            query="test",
+            language=Language.ENGLISH,
+            reference_answer=None,
+            benchmark_version="test-v1",
+        )
+        self.assertIsNone(case.reference_answer)
+        self.assertFalse(case.has_reference_answer)
+
+    def test_can_compute_flags(self):
+        # Only generated_answer and query
+        case1 = AnswerQualityEvaluationCase(
+            case_id="test-001",
+            query="test query",
+            language=Language.ENGLISH,
+            generated_answer="test answer",
+            benchmark_version="test-v1",
+        )
+        self.assertTrue(case1.can_compute_answer_relevance)
+        self.assertFalse(case1.can_compute_faithfulness)
+
+        # Generated answer and retrieved contexts
+        case2 = AnswerQualityEvaluationCase(
+            case_id="test-002",
+            query="test query",
+            language=Language.ENGLISH,
+            generated_answer="test answer",
+            retrieved_contexts=("ctx1",),
+            benchmark_version="test-v1",
+        )
+        self.assertTrue(case2.can_compute_faithfulness)
+        self.assertTrue(case2.can_compute_answer_relevance)
+
+        # With reference contexts
+        case3 = AnswerQualityEvaluationCase(
+            case_id="test-003",
+            query="test query",
+            language=Language.ENGLISH,
+            generated_answer="test answer",
+            retrieved_contexts=("ctx1",),
+            reference_contexts=("ref1",),
+            benchmark_version="test-v1",
+        )
+        self.assertTrue(case3.can_compute_context_precision)
+        self.assertTrue(case3.can_compute_context_recall)
+
+
+class TestAnswerQualityEvaluationDataset(unittest.TestCase):
+    """Tests for AnswerQualityEvaluationDataset schema validation."""
+
+    def test_valid_dataset(self):
+        cases = (
+            AnswerQualityEvaluationCase(
+                case_id="case1",
+                query="query1",
+                language=Language.ENGLISH,
+                benchmark_version="bench-v1",
+            ),
+            AnswerQualityEvaluationCase(
+                case_id="case2",
+                query="query2",
+                language=Language.ENGLISH,
+                benchmark_version="bench-v1",
+            ),
+        )
+        dataset = AnswerQualityEvaluationDataset(
+            benchmark_version="bench-v1",
+            corpus_version="corpus-v1",
+            examples=cases,
+        )
+        self.assertEqual(len(dataset.examples), 2)
+
+    def test_empty_examples_fails(self):
+        with self.assertRaises(ValueError):
+            AnswerQualityEvaluationDataset(
+                benchmark_version="bench-v1",
+                corpus_version="corpus-v1",
+                examples=(),
+            )
+
+    def test_duplicate_case_ids_fails(self):
+        with self.assertRaises(ValueError):
+            AnswerQualityEvaluationDataset(
+                benchmark_version="bench-v1",
+                corpus_version="corpus-v1",
+                examples=(
+                    AnswerQualityEvaluationCase(
+                        case_id="dup",
+                        query="q1",
+                        language=Language.ENGLISH,
+                        benchmark_version="bench-v1",
+                    ),
+                    AnswerQualityEvaluationCase(
+                        case_id="dup",
+                        query="q2",
+                        language=Language.ENGLISH,
+                        benchmark_version="bench-v1",
+                    ),
+                ),
+            )
+
+
+class TestFakeLLMJudge(unittest.TestCase):
+    """Tests for FakeLLMJudge."""
+
+    def test_default_responses(self):
+        judge = FakeLLMJudge()
+        self.assertIn("faithfulness", judge._responses)
+        self.assertIn("answer_relevance", judge._responses)
+        self.assertIn("context_precision", judge._responses)
+        self.assertIn("context_recall", judge._responses)
+
+    def test_custom_responses(self):
+        custom = {"faithfulness": (0.5, "Partial support")}
+        judge = FakeLLMJudge(custom)
+        self.assertEqual(judge._responses["faithfulness"], (0.5, "Partial support"))
+
+    async def test_judge_call_logging(self):
+        judge = FakeLLMJudge()
+        config = JudgeConfig(provider_name="fake", model_name="fake-model")
+        prompt = "Test prompt with FAITHFULNESS"
+        status, raw, parsed = await judge.judge(prompt, config)
+        self.assertEqual(status, JudgeStatus.SUCCESS)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(len(judge.call_log), 1)
+        self.assertEqual(judge.call_log[0]["prompt"], prompt)
+
+
+class TestAnswerQualitySemanticEvaluation(unittest.TestCase):
+    """Tests for semantic answer quality evaluation with FakeLLMJudge."""
+
+    def setUp(self):
+        self.case = AnswerQualityEvaluationCase(
+            case_id="test-case-001",
+            query="What is PM-KISAN payment?",
+            language=Language.ENGLISH,
+            retrieved_contexts=("PM-KISAN provides Rs. 6000 per year.",),
+            generated_answer="PM-KISAN provides Rs. 6000 per year in three installments.",
+            citation_ids=("cite1",),
+            reference_answer="PM-KISAN provides Rs. 6000 per year.",
+            reference_contexts=("PM-KISAN provides Rs. 6000 per year.",),
+            expected_response_status=AnswerStatus.ANSWERED,
+            benchmark_version="test-bench-v1",
+        )
+        self.config = JudgeConfig(
+            provider_name="fake",
+            model_name="fake-model",
+            temperature=0.0,
+        )
+
+    def test_faithfulness_evaluation_success(self):
+        async def run_test():
+            judge = FakeLLMJudge({"faithfulness": (0.9, "Highly faithful")})
+            result = await evaluate_faithfulness(self.case, judge, self.config, None)
+            self.assertEqual(result.metric_name, "faithfulness")
+            self.assertEqual(result.score, 0.9)
+            self.assertEqual(result.status, JudgeStatus.SUCCESS)
+        asyncio.run(run_test())
+
+    def test_faithfulness_insufficient_inputs(self):
+        async def run_test():
+            case_no_context = AnswerQualityEvaluationCase(
+                case_id="test-case-002",
+                query="What is PM-KISAN payment?",
+                language=Language.ENGLISH,
+                generated_answer="PM-KISAN provides Rs. 6000 per year.",
+                benchmark_version="test-bench-v1",
+            )
+            judge = FakeLLMJudge()
+            result = await evaluate_faithfulness(case_no_context, judge, self.config, None)
+            self.assertEqual(result.status, JudgeStatus.INSUFFICIENT_INPUTS)
+            self.assertIsNone(result.score)
+            self.assertIn("Missing generated_answer or retrieved_contexts", result.reason_unavailable)
+        asyncio.run(run_test())
+
+    def test_answer_relevance_evaluation_success(self):
+        async def run_test():
+            judge = FakeLLMJudge({"answer_relevance": (0.8, "Relevant")})
+            result = await evaluate_answer_relevance(self.case, judge, self.config, None)
+            self.assertEqual(result.metric_name, "answer_relevance")
+            self.assertEqual(result.score, 0.8)
+            self.assertEqual(result.status, JudgeStatus.SUCCESS)
+        asyncio.run(run_test())
+
+    def test_context_precision_evaluation_success(self):
+        async def run_test():
+            judge = FakeLLMJudge({"context_precision": (0.7, "Good precision")})
+            result = await evaluate_context_precision(self.case, judge, self.config, None)
+            self.assertEqual(result.metric_name, "context_precision")
+            self.assertEqual(result.score, 0.7)
+            self.assertEqual(result.status, JudgeStatus.SUCCESS)
+        asyncio.run(run_test())
+
+    def test_context_precision_insufficient_inputs(self):
+        async def run_test():
+            case_no_ref = AnswerQualityEvaluationCase(
+                case_id="test-case-003",
+                query="What is PM-KISAN payment?",
+                language=Language.ENGLISH,
+                retrieved_contexts=("context1",),
+                generated_answer="answer",
+                benchmark_version="test-bench-v1",
+            )
+            judge = FakeLLMJudge()
+            result = await evaluate_context_precision(case_no_ref, judge, self.config, None)
+            self.assertEqual(result.status, JudgeStatus.INSUFFICIENT_INPUTS)
+            self.assertIsNone(result.score)
+        asyncio.run(run_test())
+
+    def test_context_recall_evaluation_success(self):
+        async def run_test():
+            judge = FakeLLMJudge({"context_recall": (0.6, "Partial recall")})
+            result = await evaluate_context_recall(self.case, judge, self.config, None)
+            self.assertEqual(result.metric_name, "context_recall")
+            self.assertEqual(result.score, 0.6)
+            self.assertEqual(result.status, JudgeStatus.SUCCESS)
+        asyncio.run(run_test())
+
+    def test_full_semantic_evaluation(self):
+        async def run_test():
+            judge = FakeLLMJudge()
+            result = await evaluate_answer_quality_semantic(
+                self.case, judge, self.config, deterministic_passed=True
+            )
+            self.assertEqual(result.case_id, "test-case-001")
+            self.assertEqual(len(result.metrics), 4)
+            for metric in result.metrics:
+                self.assertEqual(metric.status, JudgeStatus.SUCCESS)
+                self.assertIsNotNone(metric.score)
+                self.assertTrue(metric.is_available)
+            self.assertTrue(result.deterministic_checks_passed)
+        asyncio.run(run_test())
+
+    def test_full_semantic_evaluation_with_missing_refs(self):
+        async def run_test():
+            case_partial = AnswerQualityEvaluationCase(
+                case_id="test-case-004",
+                query="What is PM-KISAN?",
+                language=Language.ENGLISH,
+                retrieved_contexts=("context1",),
+                generated_answer="answer",
+                benchmark_version="test-bench-v1",
+            )
+            judge = FakeLLMJudge()
+            result = await evaluate_answer_quality_semantic(
+                case_partial, judge, self.config, deterministic_passed=False
+            )
+            self.assertEqual(len(result.metrics), 4)
+            # faithfulness and answer_relevance should be available
+            # context_precision and context_recall should be unavailable
+            available = [m for m in result.metrics if m.is_available]
+            unavailable = [m for m in result.metrics if not m.is_available]
+            self.assertEqual(len(available), 2)
+            self.assertEqual(len(unavailable), 2)
+            self.assertFalse(result.deterministic_checks_passed)
+        asyncio.run(run_test())
+
+    def test_judge_failure_handling(self):
+        async def run_test():
+            class FailingJudge:
+                async def judge(self, prompt, config):
+                    return JudgeStatus.JUDGE_UNAVAILABLE, None, None
+
+            judge = FailingJudge()
+            result = await evaluate_faithfulness(self.case, judge, self.config, None)
+            self.assertEqual(result.status, JudgeStatus.JUDGE_UNAVAILABLE)
+            self.assertIsNone(result.score)
+        asyncio.run(run_test())
+
+    def test_malformed_judge_output(self):
+        async def run_test():
+            class BadOutputJudge:
+                async def judge(self, prompt, config):
+                    return JudgeStatus.SUCCESS, "not json", {"invalid": "output"}
+
+            judge = BadOutputJudge()
+            result = await evaluate_faithfulness(self.case, judge, self.config, None)
+            self.assertEqual(result.status, JudgeStatus.MALFORMED_OUTPUT)
+            self.assertIsNone(result.score)
+        asyncio.run(run_test())
+
+    def test_invalid_score_range(self):
+        async def run_test():
+            class BadScoreJudge:
+                async def judge(self, prompt, config):
+                    return JudgeStatus.SUCCESS, '{"score": 1.5}', {"score": 1.5}
+
+            judge = BadScoreJudge()
+            result = await evaluate_faithfulness(self.case, judge, self.config, None)
+            self.assertEqual(result.status, JudgeStatus.MALFORMED_OUTPUT)
+            self.assertIsNone(result.score)
+        asyncio.run(run_test())
+
+
+class TestAnswerQualityDatasetEvaluation(unittest.TestCase):
+    """Tests for dataset-level semantic evaluation."""
+
+    def setUp(self):
+        self.cases = (
+            AnswerQualityEvaluationCase(
+                case_id="case1",
+                query="Query 1",
+                language=Language.ENGLISH,
+                retrieved_contexts=("ctx1",),
+                generated_answer="answer1",
+                reference_answer="ref1",
+                reference_contexts=("ref_ctx1",),
+                benchmark_version="bench-v1",
+            ),
+            AnswerQualityEvaluationCase(
+                case_id="case2",
+                query="Query 2",
+                language=Language.ENGLISH,
+                retrieved_contexts=("ctx2",),
+                generated_answer="answer2",
+                reference_answer="ref2",
+                reference_contexts=("ref_ctx2",),
+                benchmark_version="bench-v1",
+            ),
+        )
+        self.dataset = AnswerQualityEvaluationDataset(
+            benchmark_version="bench-v1",
+            corpus_version="corpus-v1",
+            examples=self.cases,
+        )
+        self.config = JudgeConfig(provider_name="fake", model_name="fake-model")
+
+    def test_dataset_evaluation_all_pass(self):
+        async def run_test():
+            judge = FakeLLMJudge()
+            summary = await evaluate_answer_quality_dataset(
+                self.dataset, judge, self.config, system_version="test-system"
+            )
+            self.assertEqual(summary.total_cases, 2)
+            self.assertEqual(summary.benchmark_version, "bench-v1")
+            self.assertEqual(summary.corpus_version, "corpus-v1")
+            self.assertEqual(summary.system_version, "test-system")
+            for metric_name in ["faithfulness", "answer_relevance", "context_precision", "context_recall"]:
+                self.assertIn(metric_name, summary.metrics_summary)
+                self.assertEqual(summary.metrics_summary[metric_name]["available_count"], 2)
+                self.assertEqual(summary.metrics_summary[metric_name]["unavailable_count"], 0)
+        asyncio.run(run_test())
+
+    def test_dataset_evaluation_with_deterministic_results(self):
+        async def run_test():
+            judge = FakeLLMJudge()
+            det_results = {"case1": True, "case2": False}
+            summary = await evaluate_answer_quality_dataset(
+                self.dataset, judge, self.config, deterministic_results=det_results
+            )
+            self.assertTrue(summary.per_case[0].deterministic_checks_passed)
+            self.assertFalse(summary.per_case[1].deterministic_checks_passed)
+        asyncio.run(run_test())
+
+    def test_judge_metadata_recorded(self):
+        async def run_test():
+            judge = FakeLLMJudge()
+            summary = await evaluate_answer_quality_dataset(
+                self.dataset, judge, self.config
+            )
+            self.assertEqual(summary.judge_metadata.judge_provider, "fake")
+            self.assertEqual(summary.judge_metadata.judge_model, "fake-model")
+            self.assertEqual(summary.judge_metadata.temperature, 0.0)
+            self.assertIn("evaluation_timestamp_utc", summary.judge_metadata.to_dict())
+        asyncio.run(run_test())
+
+
+class TestAnswerQualityReportGeneration(unittest.TestCase):
+    """Tests for answer quality report generation."""
+
+    def setUp(self):
+        self.judge_metadata = JudgeMetadata(
+            benchmark_version="bench-v1",
+            judge_provider="fake",
+            judge_model="fake-model",
+            temperature=0.0,
+            evaluation_timestamp_utc="2026-01-01T00:00:00Z",
+        )
+        self.metrics = (
+            AnswerQualityMetricResult(
+                metric_name="faithfulness",
+                score=0.9,
+                status=JudgeStatus.SUCCESS,
+                judge_metadata=self.judge_metadata,
+            ),
+            AnswerQualityMetricResult(
+                metric_name="answer_relevance",
+                score=0.8,
+                status=JudgeStatus.SUCCESS,
+                judge_metadata=self.judge_metadata,
+            ),
+            AnswerQualityMetricResult(
+                metric_name="context_precision",
+                score=None,
+                status=JudgeStatus.INSUFFICIENT_INPUTS,
+                reason_unavailable="Missing reference_contexts",
+                judge_metadata=self.judge_metadata,
+            ),
+            AnswerQualityMetricResult(
+                metric_name="context_recall",
+                score=None,
+                status=JudgeStatus.INSUFFICIENT_INPUTS,
+                reason_unavailable="Missing reference_contexts",
+                judge_metadata=self.judge_metadata,
+            ),
+        )
+        self.case_result = AnswerQualityEvaluationResult(
+            case_id="test-case-001",
+            query="What is PM-KISAN?",
+            language="en",
+            metrics=self.metrics,
+            deterministic_checks_passed=True,
+        )
+        self.summary = AnswerQualityEvaluationSummary(
+            benchmark_version="bench-v1",
+            corpus_version="corpus-v1",
+            system_version="test-system",
+            total_cases=1,
+            metrics_summary={
+                "faithfulness": {"mean_score": 0.9, "available_count": 1, "unavailable_count": 0, "unavailable_reasons": []},
+                "answer_relevance": {"mean_score": 0.8, "available_count": 1, "unavailable_count": 0, "unavailable_reasons": []},
+                "context_precision": {"mean_score": 0.0, "available_count": 0, "unavailable_count": 1, "unavailable_reasons": ["Missing reference_contexts"]},
+                "context_recall": {"mean_score": 0.0, "available_count": 0, "unavailable_count": 1, "unavailable_reasons": ["Missing reference_contexts"]},
+            },
+            judge_metadata=self.judge_metadata,
+            per_case=(self.case_result,),
+            timestamp_utc="2026-01-01T00:00:00Z",
+        )
+
+    def test_jsonl_generation(self):
+        lines = generate_answer_quality_jsonl(self.summary)
+        self.assertEqual(len(lines), 4)  # 4 metrics
+        for line in lines:
+            data = json.loads(line)
+            self.assertIn("metric", data)
+            self.assertIn("value", data)
+            self.assertIn("judge_provider", data)
+            self.assertIn("judge_model", data)
+
+    def test_markdown_generation(self):
+        md = generate_answer_quality_markdown(self.summary)
+        self.assertIn("Semantic Answer Quality Evaluation Report", md)
+        self.assertIn("Judge Metadata", md)
+        self.assertIn("fake", md)
+        self.assertIn("fake-model", md)
+        self.assertIn("faithfulness", md)
+        self.assertIn("0.900", md)
+        self.assertIn("answer_relevance", md)
+        self.assertIn("0.800", md)
+        self.assertIn("context_precision", md)
+        self.assertIn("insufficient_inputs", md)  # status value is lowercase
+        self.assertIn("Missing reference_contexts", md)
+        self.assertIn("Limitations", md)
+        self.assertIn("judge bias", md.lower())
+
+    def test_metric_result_to_dict(self):
+        metric = self.metrics[0]
+        d = metric.to_dict()
+        self.assertEqual(d["metric_name"], "faithfulness")
+        self.assertEqual(d["score"], 0.9)
+        self.assertEqual(d["status"], "success")
+        self.assertIsNotNone(d["judge_metadata"])
+
+    def test_case_result_to_dict(self):
+        d = self.case_result.to_dict()
+        self.assertEqual(d["case_id"], "test-case-001")
+        self.assertEqual(d["deterministic_checks_passed"], True)
+        self.assertEqual(len(d["metrics"]), 4)
+
+    def test_summary_to_dict(self):
+        d = self.summary.to_dict()
+        self.assertEqual(d["benchmark_version"], "bench-v1")
+        self.assertEqual(d["total_cases"], 1)
+        self.assertIn("metrics_summary", d)
+        self.assertIn("judge_metadata", d)
+        self.assertIn("per_case", d)
+
+
+class TestLoadAnswerQualityDataset(unittest.TestCase):
+    """Tests for loading answer quality dataset from JSON."""
+
+    def test_load_existing_dataset(self):
+        dataset = load_answer_quality_dataset("data/evaluation/answer_quality/answer_quality_en_v1.json")
+        self.assertEqual(dataset.benchmark_version, "answer-quality-en-v1")
+        self.assertEqual(len(dataset.examples), 5)
+        for case in dataset.examples:
+            self.assertEqual(case.benchmark_version, "answer-quality-en-v1")
+            self.assertTrue(case.can_compute_faithfulness)
+            self.assertTrue(case.can_compute_answer_relevance)
+            self.assertTrue(case.can_compute_context_precision)
+            self.assertTrue(case.can_compute_context_recall)
 
 
 if __name__ == "__main__":

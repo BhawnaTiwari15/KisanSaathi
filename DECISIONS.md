@@ -208,3 +208,28 @@ esolve_evidence_batch collect refusals in a CitationBatch instead of raising, so
 **Reason:** Vision must be a replaceable infrastructure dependency. The protocol keeps domain pure and testable. Hosted multimodal LLM (Gemini) is the pragmatic first choice: zero model ops, multilingual out of box, structured output support, pay-per-use. Specialized classifier or local VLM can be swapped later without domain changes. Vision output is explicitly uncertain and never used as authoritative evidence — it only augments retrieval queries.
 
 **Trade-off:** Generalist model accuracy on rare crops/diseases is moderate; mitigated by uncertainty framing, confidence thresholds, and mandatory document grounding. Cost: ~$0.0001/image (Gemini 1.5 Flash). Latency: ~1.5s. No offline mode in MVP (fake provider for tests only). No custom crop-disease dataset or training in this milestone.
+
+## 2026-10-07: Add LLM-judge answer quality evaluation (RAGAS-compatible adapter)
+
+**Decision:** Add `kisansathi.evaluation.answer_quality` with semantic metrics (Faithfulness, Answer Relevance, Context Precision, Context Recall) via a provider-agnostic `LLMJudge` protocol. A `FakeLLMJudge` enables deterministic testing without API calls. Evaluation cases (`AnswerQualityEvaluationCase`) are versioned, strongly validated, and separate from deterministic answer checks (`AnswerExample`). An explicit opt-in CLI command (`answer-quality`) runs the evaluation; it is NOT part of normal pytest.
+
+**Architecture:**
+- **Separation of concerns**: Deterministic checks (status, language, citations, refusals) in `answer.py`; semantic LLM-judge metrics in `answer_quality.py`
+- **RAGAS-compatible adapter** rather than direct RAGAS dependency — avoids unnecessary coupling, same metric semantics
+- **Injectable judge**: `LLMJudge` protocol with `FakeLLMJudge` for tests; real providers implemented programmatically
+- **Prompt-injection safety**: Evaluation prompts explicitly tell judge not to follow instructions in retrieved/generated content
+- **Missing-input handling**: Metrics marked unavailable with reason when required inputs missing (no fake scores)
+- **Reproducibility metadata**: Benchmark version, judge provider/model, temperature, timestamp, config recorded in every report
+- **No API keys in logs/reports**
+
+**Benchmarks:**
+- Hand-authored English dataset: `data/evaluation/answer_quality/answer_quality_en_v1.json` (5 cases, corpus-versioned)
+- No multilingual answer-quality labels fabricated — Hindi/Kannada/Telugu not reported without real labels
+
+**Reports:**
+- Machine-readable JSONL (one line per metric with judge metadata)
+- Human-readable Markdown (summary table, per-case breakdown, limitations section)
+
+**Reason:** Semantic answer quality requires LLM judgment and is fundamentally different from deterministic citation/status checks. Keeping it separate preserves pytest determinism (no LLM calls in CI) while providing opt-in RAGAS-style metrics. The adapter approach avoids adding RAGAS as a hard dependency (extra weight, version coupling) while maintaining metric compatibility.
+
+**Trade-off:** Judge bias/variance affects scores; no confidence intervals or statistical significance. Results not comparable across different judge providers/models/configurations. Context precision/recall require reference contexts (unavailable when missing). Cost/latency of real judge calls. No offline mode for semantic metrics (fake judge for tests only).
