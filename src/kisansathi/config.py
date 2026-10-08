@@ -1,9 +1,9 @@
 """Environment-backed settings for the KisanSaathi application."""
 
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-import os
 
 from kisansathi.domain.schemas import Language
 
@@ -24,6 +24,15 @@ DEFAULT_VISION_RETRY_BACKOFF_BASE = 1.0
 DEFAULT_VISION_MAX_IMAGE_BYTES = 10 * 1024 * 1024
 DEFAULT_VISION_TEMPERATURE = 0.0
 DEFAULT_VISION_MAX_OUTPUT_TOKENS = 1024
+
+# LLM (answer generation) provider defaults
+DEFAULT_LLM_PROVIDER = "fake"
+DEFAULT_LLM_MODEL_NAME = "gemini-3.5-flash-lite"
+DEFAULT_LLM_TIMEOUT_SECONDS = 15.0
+DEFAULT_LLM_CONNECT_TIMEOUT_SECONDS = 5.0
+DEFAULT_LLM_MAX_RETRIES = 2
+DEFAULT_LLM_TEMPERATURE = 0.0
+DEFAULT_LLM_MAX_TOKENS = 512
 
 DEFAULT_SOURCES_MANIFEST_PATH = "data/sources.json"
 
@@ -59,6 +68,21 @@ class VisionProvider(StrEnum):
             raise ValueError(f"Unsupported vision provider: {value!r}") from error
 
 
+class LLMProvider(StrEnum):
+    """Supported answer generation (LLM) providers."""
+
+    FAKE = "fake"
+    GEMINI = "gemini"
+
+    @classmethod
+    def parse(cls, value: str) -> "LLMProvider":
+        normalized = value.strip().lower()
+        try:
+            return cls(normalized)
+        except ValueError as error:
+            raise ValueError(f"Unsupported LLM provider: {value!r}") from error
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     """Settings read from process environment variables."""
@@ -83,6 +107,16 @@ class Settings:
     vision_max_image_bytes: int = DEFAULT_VISION_MAX_IMAGE_BYTES
     vision_temperature: float = DEFAULT_VISION_TEMPERATURE
     vision_max_output_tokens: int = DEFAULT_VISION_MAX_OUTPUT_TOKENS
+
+    # LLM answer generation settings
+    llm_provider: LLMProvider = LLMProvider.FAKE
+    llm_model_name: str = DEFAULT_LLM_MODEL_NAME
+    llm_api_key: str | None = None
+    llm_timeout_seconds: float = DEFAULT_LLM_TIMEOUT_SECONDS
+    llm_connect_timeout_seconds: float = DEFAULT_LLM_CONNECT_TIMEOUT_SECONDS
+    llm_max_retries: int = DEFAULT_LLM_MAX_RETRIES
+    llm_temperature: float = DEFAULT_LLM_TEMPERATURE
+    llm_max_tokens: int = DEFAULT_LLM_MAX_TOKENS
     sources_manifest_path: str | None = None
 
     def __post_init__(self) -> None:
@@ -118,6 +152,18 @@ class Settings:
             raise ValueError("Vision temperature must be between 0.0 and 2.0")
         if self.vision_max_output_tokens <= 0:
             raise ValueError("Vision max output tokens must be positive")
+        if not self.llm_model_name.strip():
+            raise ValueError("LLM model name must not be empty")
+        if self.llm_timeout_seconds <= 0:
+            raise ValueError("LLM timeout must be positive")
+        if self.llm_connect_timeout_seconds <= 0:
+            raise ValueError("LLM connect timeout must be positive")
+        if self.llm_max_retries < 0:
+            raise ValueError("LLM max retries must be non-negative")
+        if not (0.0 <= self.llm_temperature <= 2.0):
+            raise ValueError("LLM temperature must be between 0.0 and 2.0")
+        if self.llm_max_tokens <= 0:
+            raise ValueError("LLM max tokens must be positive")
         if self.sources_manifest_path is not None and not self.sources_manifest_path.strip():
             raise ValueError("Sources manifest path must not be blank")
 
@@ -178,7 +224,8 @@ class Settings:
         )
         vision_connect_timeout_seconds = float(
             values.get(
-                "KISANSAATHI_VISION_CONNECT_TIMEOUT_SECONDS", str(DEFAULT_VISION_CONNECT_TIMEOUT_SECONDS)
+                "KISANSAATHI_VISION_CONNECT_TIMEOUT_SECONDS",
+                str(DEFAULT_VISION_CONNECT_TIMEOUT_SECONDS),
             )
         )
         vision_max_retries = int(
@@ -196,7 +243,34 @@ class Settings:
             values.get("KISANSAATHI_VISION_TEMPERATURE", str(DEFAULT_VISION_TEMPERATURE))
         )
         vision_max_output_tokens = int(
-            values.get("KISANSAATHI_VISION_MAX_OUTPUT_TOKENS", str(DEFAULT_VISION_MAX_OUTPUT_TOKENS))
+            values.get(
+                "KISANSAATHI_VISION_MAX_OUTPUT_TOKENS", str(DEFAULT_VISION_MAX_OUTPUT_TOKENS)
+            )
+        )
+
+        llm_provider = LLMProvider.parse(
+            values.get("KISANSAATHI_LLM_PROVIDER", DEFAULT_LLM_PROVIDER)
+        )
+        llm_model_name = values.get("KISANSAATHI_LLM_MODEL_NAME", DEFAULT_LLM_MODEL_NAME).strip()
+        llm_api_key = values.get("KISANSAATHI_LLM_API_KEY")
+        if llm_api_key is not None:
+            llm_api_key = llm_api_key.strip() or None
+        llm_timeout_seconds = float(
+            values.get("KISANSAATHI_LLM_TIMEOUT_SECONDS", str(DEFAULT_LLM_TIMEOUT_SECONDS))
+        )
+        llm_connect_timeout_seconds = float(
+            values.get(
+                "KISANSAATHI_LLM_CONNECT_TIMEOUT_SECONDS", str(DEFAULT_LLM_CONNECT_TIMEOUT_SECONDS)
+            )
+        )
+        llm_max_retries = int(
+            values.get("KISANSAATHI_LLM_MAX_RETRIES", str(DEFAULT_LLM_MAX_RETRIES))
+        )
+        llm_temperature = float(
+            values.get("KISANSAATHI_LLM_TEMPERATURE", str(DEFAULT_LLM_TEMPERATURE))
+        )
+        llm_max_tokens = int(
+            values.get("KISANSAATHI_LLM_MAX_TOKENS", str(DEFAULT_LLM_MAX_TOKENS))
         )
 
         sources_manifest_path = values.get("KISANSAATHI_SOURCES_MANIFEST")
@@ -222,5 +296,13 @@ class Settings:
             vision_max_image_bytes=vision_max_image_bytes,
             vision_temperature=vision_temperature,
             vision_max_output_tokens=vision_max_output_tokens,
+            llm_provider=llm_provider,
+            llm_model_name=llm_model_name,
+            llm_api_key=llm_api_key,
+            llm_timeout_seconds=llm_timeout_seconds,
+            llm_connect_timeout_seconds=llm_connect_timeout_seconds,
+            llm_max_retries=llm_max_retries,
+            llm_temperature=llm_temperature,
+            llm_max_tokens=llm_max_tokens,
             sources_manifest_path=sources_manifest_path,
         )

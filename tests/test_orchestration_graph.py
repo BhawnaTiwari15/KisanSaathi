@@ -143,6 +143,17 @@ class OrchestrationGraphTests(unittest.TestCase):
         self.assertIsInstance(result["response"], AssistantResponse)
         self.assertEqual(result["response"].status, ResponseStatus.ANSWERED)
 
+    def test_ambiguous_mixed_script_message_falls_back_gracefully(self) -> None:
+        retriever = FakeRetriever((make_result("c1"),))
+        graph = build_graph(retriever).compile()
+        message = UserMessage(text="किसान రైతు kisan", language=None)
+
+        result = graph.invoke(make_state(message))
+
+        self.assertIsNone(result["detected_language"])
+        self.assertEqual(retriever.calls, [(message.text, 5)])
+        self.assertEqual(result["response"].status, ResponseStatus.ANSWERED)
+
     def test_very_short_message_takes_clarification_route(self) -> None:
         retriever = FakeRetriever()
         graph = build_graph(retriever).compile()

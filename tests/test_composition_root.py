@@ -4,7 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from kisansathi.config import Settings
 from kisansathi.ui.composition_root import (
@@ -16,6 +16,9 @@ from kisansathi.ui.composition_root import (
 class _StubRetriever:
     def retrieve(self, query: str, *, top_k: int | None = None) -> tuple[object, ...]:
         return ()
+
+    def close(self) -> None:
+        pass
 
 
 def _manifest_with_source(source_id: str = "tmp-source") -> dict[str, object]:
@@ -83,6 +86,57 @@ class CitationResolverDefaultsTests(unittest.TestCase):
             mock_resolver.assert_called_once_with(manifest)
             passed_resolver = mock_graph.call_args.kwargs["citation_resolver"]
             self.assertEqual(passed_resolver, mock_resolver.return_value)
+
+
+class ApplicationServiceCloseTests(unittest.TestCase):
+    def test_application_service_stores_retriever(self) -> None:
+        """ApplicationService stores the retriever instance."""
+        retriever = _StubRetriever()
+        with patch("kisansathi.ui.composition_root.build_graph") as mock_graph:
+            mock_graph.return_value.compile.return_value = MagicMock()
+            service = build_application_service(retriever=retriever)
+
+        self.assertIs(service.retriever, retriever)
+
+    def test_close_calls_retriever_close(self) -> None:
+        """ApplicationService.close() calls retriever.close()."""
+        retriever = _StubRetriever()
+        retriever.close = MagicMock()
+        with patch("kisansathi.ui.composition_root.build_graph") as mock_graph:
+            mock_graph.return_value.compile.return_value = MagicMock()
+            service = build_application_service(retriever=retriever)
+
+        service.close()
+        retriever.close.assert_called_once()
+
+    def test_close_idempotent(self) -> None:
+        """ApplicationService.close() is safe to call multiple times."""
+        retriever = _StubRetriever()
+        retriever.close = MagicMock()
+        with patch("kisansathi.ui.composition_root.build_graph") as mock_graph:
+            mock_graph.return_value.compile.return_value = MagicMock()
+            service = build_application_service(retriever=retriever)
+
+        service.close()
+        service.close()
+        self.assertEqual(retriever.close.call_count, 2)
+
+    def test_atexit_registered(self) -> None:
+        """build_application_service registers cleanup with atexit."""
+        retriever = _StubRetriever()
+        retriever.close = MagicMock()
+        with (
+            patch("kisansathi.ui.composition_root.build_graph") as mock_graph,
+            patch("kisansathi.ui.composition_root.atexit.register") as mock_register,
+        ):
+            mock_graph.return_value.compile.return_value = MagicMock()
+            build_application_service(retriever=retriever)
+
+        mock_register.assert_called_once()
+        # The registered function should be the service's close method
+        registered_func = mock_register.call_args[0][0]
+        registered_func()
+        retriever.close.assert_called_once()
 
 
 if __name__ == "__main__":

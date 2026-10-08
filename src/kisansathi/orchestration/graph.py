@@ -34,16 +34,13 @@ from kisansathi.generation.models import (
     MalformedOutputError,
 )
 from kisansathi.guardrails import GuardrailCategory, apply_final_guardrails
-from kisansathi.language import DeterministicLanguageDetector, LanguageDetector
-from kisansathi.retrieval.vector_store import SearchResult
-from kisansathi.voice import (
-    EmptyTranscriptError,
-    InvalidAudioError,
-    SpeechToText,
-    SpeechToTextError,
-    TranscriptionError,
-    TranscriptionResult,
+from kisansathi.language import (
+    AmbiguousLanguageError,
+    DetectionError,
+    DeterministicLanguageDetector,
+    LanguageDetector,
 )
+from kisansathi.retrieval.vector_store import SearchResult
 from kisansathi.voice import (
     EmptyTranscriptError,
     InvalidAudioError,
@@ -914,6 +911,7 @@ def build_graph(
             eligibility_decision=state.get("eligibility_decision"),
             weather=state.get("weather"),
             vision_result=state.get("vision_result"),
+            retrieved_chunks=state.get("retrieved_chunks") or (),
         )
 
         try:

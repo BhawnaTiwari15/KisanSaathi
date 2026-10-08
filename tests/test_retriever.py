@@ -95,5 +95,59 @@ class DenseRetrieverTests(unittest.TestCase):
             DenseRetriever(self.embeddings, self.vector_store, default_top_k=0)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class FakeVectorStoreWithClose:
+    def __init__(self, results: tuple[SearchResult, ...]) -> None:
+        self.results = results
+        self.query_vector: object | None = None
+        self.limit: int | None = None
+        self.closed = False
+        self.close_count = 0
+
+    def search(
+        self,
+        query_vector: np.ndarray,
+        *,
+        limit: int = 5,
+    ) -> tuple[SearchResult, ...]:
+        self.query_vector = query_vector
+        self.limit = limit
+        return self.results
+
+    def close(self) -> None:
+        self.closed = True
+        self.close_count += 1
+
+
+class DenseRetrieverCloseTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.vector = np.array([0.25, 0.75], dtype=np.float32)
+        self.results = (
+            SearchResult(
+                score=0.93,
+                payload={"chunk_id": "chunk-1", "text": "Relevant content"},
+            ),
+            SearchResult(
+                score=0.81,
+                payload={"chunk_id": "chunk-2", "text": "Other content"},
+            ),
+        )
+        self.embeddings = FakeEmbeddingService(self.vector)
+        self.vector_store = FakeVectorStoreWithClose(self.results)
+        self.retriever = DenseRetriever(self.embeddings, self.vector_store)
+
+    def test_close_calls_vector_store_close(self) -> None:
+        self.retriever.close()
+        self.assertTrue(self.vector_store.closed)
+        self.assertEqual(self.vector_store.close_count, 1)
+
+    def test_close_idempotent(self) -> None:
+        self.retriever.close()
+        self.retriever.close()
+        # Second close should not call vector_store.close again
+        self.assertEqual(self.vector_store.close_count, 1)
+
+    def test_close_safe_when_vector_store_has_no_close(self) -> None:
+        retriever = DenseRetriever(self.embeddings, FakeVectorStore(self.results))
+        # Should not raise
+        retriever.close()
+        retriever.close()

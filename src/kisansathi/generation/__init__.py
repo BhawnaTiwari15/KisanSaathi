@@ -9,12 +9,13 @@ from kisansathi.generation.fake import (
     make_fake_generated_answer,
     make_fake_generation_context,
 )
+from kisansathi.generation.gemini import GeminiTextClient
 from kisansathi.generation.generator import DefaultAnswerGenerator
 from kisansathi.generation.models import (
     AnswerGenerator,
+    GeneratedAnswer,
     GenerationContext,
     GenerationError,
-    GeneratedAnswer,
     GroundingError,
     LLMClient,
     LLMError,
@@ -31,6 +32,7 @@ __all__ = [
     "DefaultAnswerGenerator",
     "FakeAnswerGenerator",
     "FakeLLMClient",
+    "GeminiTextClient",
     "GenerationContext",
     "GenerationError",
     "GeneratedAnswer",

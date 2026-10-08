@@ -8,6 +8,7 @@ from kisansathi.citations.models import CitationBatch
 from kisansathi.domain.schemas import Language, ResponseStatus, UserMessage
 from kisansathi.eligibility.models import EligibilityDecision
 from kisansathi.generation.models import GeneratedAnswer, GroundingError, MalformedOutputError
+from kisansathi.retrieval.vector_store import SearchResult
 from kisansathi.weather.models import WeatherResponse
 from kisansathi.vision.models import VisionResult, VisionStatus
 
@@ -30,7 +31,9 @@ def _sanitize_text(text: str) -> str:
     return cleaned[:_MAX_EXCERPT_CHARS]
 
 
-def _format_citations(batch: CitationBatch) -> str:
+def _format_citations(
+    batch: CitationBatch, chunk_texts: dict[str, str] | None = None
+) -> str:
     """Format citations as a numbered list for the prompt.
 
     Only metadata and a short verbatim excerpt are included — never the full
@@ -48,11 +51,16 @@ def _format_citations(batch: CitationBatch) -> str:
         )
         safe_title = _sanitize_text(citation.title)
         safe_authority = _sanitize_text(citation.issuing_authority)
+        # Use actual chunk text for excerpt if available, fall back to title
+        if chunk_texts and citation.chunk_id in chunk_texts:
+            excerpt = _sanitize_text(chunk_texts[citation.chunk_id])
+        else:
+            excerpt = safe_title
         lines.append(
             f"[{i}] {citation.chunk_id} ({page_info})\n"
             f"    Title: {safe_title}\n"
             f"    Authority: {safe_authority}\n"
-            f"    Excerpt: {safe_title}"
+            f"    Excerpt: {excerpt}"
         )
     return "\n\n".join(lines)
 
@@ -129,6 +137,21 @@ def build_system_prompt(language: Language) -> str:
         f"5. If the evidence is insufficient, say so clearly and do not guess.\n"
         f"6. Answer in {lang_name}.\n"
         f"7. Keep answers concise and actionable for a farmer.\n"
+        f"8. Output contract (the response MUST follow this exactly):\n"
+        f"   - The response must begin with exactly: ANSWER:\n"
+        f"   - The answer text follows immediately after ANSWER:.\n"
+        f"   - Then exactly: CITATIONS:\n"
+        f"   - Citation IDs use the existing format <source_id>:<24-hex>, e.g. "
+        f"[pm-kisan-revised-faq:33ff2db494c59ab1ca6c4f76].\n"
+        f"   - Output nothing before ANSWER: and nothing after the last citation ID.\n"
+        f"   - Do not add markdown, code fences, or any other labels around the response.\n"
+        f"   - Do not invent citation IDs; use only IDs supplied in the EVIDENCE section.\n"
+        f"   - If no supplied citation supports a claim, do not make that claim.\n"
+        f"Example:\n"
+        f"ANSWER:\n"
+        f"The required documents are described in the official FAQ.\n"
+        f"CITATIONS:\n"
+        f"[pm-kisan-revised-faq:33ff2db494c59ab1ca6c4f76]\n"
     )
 
 
@@ -138,9 +161,18 @@ def build_user_prompt(
     eligibility_decision: EligibilityDecision | None,
     weather: WeatherResponse | None,
     vision_result: VisionResult | None = None,
+    retrieved_chunks: tuple[SearchResult, ...] = (),
 ) -> str:
     """Assemble the grounded context into a user prompt."""
-    evidence = _format_citations(citations)
+    # Build chunk_id -> text mapping from retrieved chunks
+    chunk_texts: dict[str, str] = {}
+    for result in retrieved_chunks:
+        chunk_id = result.payload.get("chunk_id")
+        text = result.payload.get("text")
+        if isinstance(chunk_id, str) and isinstance(text, str):
+            chunk_texts[chunk_id] = text
+
+    evidence = _format_citations(citations, chunk_texts)
     eligibility = _format_eligibility(eligibility_decision)
     weather_str = _format_weather(weather)
     vision_str = _format_vision(vision_result)

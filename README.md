@@ -1,332 +1,290 @@
 # KisanSaathi
 
-KisanSaathi is a multilingual, multimodal AI assistant for farmers. The current implementation includes the Python foundation, an offline ingestion pipeline for manually curated official PDF sources, dense, BM25, and hybrid retrieval, a lazy second-stage reranker, a local Qdrant vector-store abstraction, explicit JSONL indexing, a deterministic LangGraph orchestration with citations, eligibility, weather, vision, voice, and generation boundaries, and a mobile-friendly Streamlit UI. Automatic PDF downloading, OCR, and production LLM/speech providers are not implemented.
+## Overview
 
-## Requirements
+KisanSaathi is a multimodal, multilingual farm advisory and government-scheme assistant for farmers. It combines text, voice, and image inputs with grounded retrieval, deterministic eligibility rules, weather information, citations, and fail-closed response handling.
 
-- Python 3.12
-- A computer that can run the offline models locally (development), or a small virtual private server (deployment, see [Deployment](#deployment))
+The assistant answers questions about official Indian agricultural scheme documents — currently the PM-KISAN revised FAQ and the Maharashtra PM-KISAN Crop Damage Incentive (PDMC) 2026–27 notification. Answers are grounded in chunks retrieved from that corpus at query time; every claim carries a citation; and when evidence is empty, invalid, or insufficient, the system abstains or asks for clarification instead of guessing.
 
-## Set up
+This repository is the complete Python implementation: an offline ingestion pipeline, dense/BM25/hybrid retrieval with an optional reranker, a LangGraph state machine, deterministic eligibility evaluation, weather and vision providers, an evaluation harness, and a mobile-friendly Streamlit UI. It runs end-to-end on CPU without any API keys (a real vision provider is opt-in; real answer-generation and speech-to-text providers are not yet configured).
 
-From PowerShell, create the virtual environment and install the project with its development tools:
+## Features
 
-```powershell
-py -3.12 -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev]"
+- **Hybrid retrieval** — dense embeddings (BGE-M3 / Qdrant), lexical BM25 (SQLite FTS5), fused with Reciprocal Rank Fusion.
+- **Second-stage reranking** — lazy cross-encoder (BGE-reranker-v2-M3) over a bounded candidate set.
+- **Deterministic orchestration** — a compiled LangGraph routes requests to retrieval, eligibility, weather, or clarification.
+- **Grounding with citations** — every answer is built from retrieved evidence and validated against a tracked source manifest.
+- **Fail-closed guardrails** — abstention and clarification on missing, malformed, or invalid evidence.
+- **Deterministic eligibility** — PM-KISAN rules whose conditions quote verbatim corpus excerpts.
+- **Optional multimodal inputs** — image analysis (Gemini, opt-in), weather (Open-Meteo), audio upload (transcription boundary only).
+- **Honest evaluation** — hand-labeled benchmarks pinned to corpus checksums; languages without labels are reported as unavailable, never scored by proxy.
+
+## Architecture
+
+The application is a thin Streamlit presentation layer over a compiled LangGraph. A composition root assembles the real service once per process and injects every external dependency (retriever, weather client, citation resolver, eligibility evaluator, language detector, and optional vision/speech providers).
+
+```
+User (text / image / audio / location / eligibility facts)
+  │
+  ▼
+Streamlit UI
+  │
+  ▼
+Composition root (ui.composition_root.build_application_service)
+  │
+  ▼
+LangGraph StateGraph (orchestration.graph.build_graph)
+  │
+  START → speech_to_text → vision → route_request
+  │
+  ├── Retrieval : detect_language → retrieve → resolve_citations
+  │               → generate_answer → validate_and_attach_citations
+  ├── Eligibility: detect_language → eligibility → resolve_citations → same spine
+  ├── Weather   : weather (requires explicit coordinates)
+  └── Clarify   : underspecified or missing-fact requests
+  │
+  ▼
+apply_guardrails → finalize_response
+  │
+  ▼
+AssistantResponse (answered / needs clarification / abstained + citations)
+  │
+  ▼
+Streamlit UI (status, sources expander, footers)
 ```
 
-From Command Prompt, activate with `.venv\Scripts\activate.bat` instead. Install the optional UI extra (`streamlit`) with `python -m pip install -e ".[ui]"`.
+All evidence-bearing routes converge on one `resolve_citations` node; the citation resolver — not the graph — decides what is citable. The graph never constructs a `Citation` itself and never reads chunk text, which prevents citation fabrication. The weather route bypasses the citation layer because weather carries no document evidence. A deterministic script-based language detector runs on the retrieval and eligibility paths; ambiguous script mixes fall back gracefully without crashing.
 
-Runtime dependencies: PyMuPDF for extracting text and layout information from local PDFs, Sentence Transformers for embeddings and cross-encoder reranking, Qdrant for local vector storage, and `httpx` (direct project dependency; used by the vision provider).
+## Tech Stack
 
-## Configuration
+| Layer | Technology |
+|---|---|
+| Language | Python 3.12 |
+| Embeddings / reranker | Sentence-Transformers, `BAAI/bge-m3` (1024-d), `BAAI/bge-reranker-v2-m3` |
+| Vector store | Qdrant (local persistent storage) |
+| Lexical index | SQLite FTS5 BM25 (standard library) |
+| Orchestration | LangGraph `StateGraph` |
+| UI | Streamlit (optional extra) |
+| PDF parsing | PyMuPDF (text-based PDFs only) |
+| Weather | Open-Meteo forecast API (no key) |
+| Vision | httpx-based Gemini provider (opt-in) |
+| Tests | pytest (771 passed, 11 skipped, zero network) |
 
-Copy `.env.example` to `.env` when configuring local settings, or export the `KISANSAATHI_*` variables in your shell. Do not put secrets in `.env.example` or commit `.env`. Settings are read from process environment variables; this project does not parse `.env` files automatically.
+## Data Sources & Provenance
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `KISANSAATHI_ENV` | `development` | Application environment: `development`, `test`, `production` |
-| `KISANSAATHI_DEFAULT_LANGUAGE` | `en` | Default UI language: `en` or `hi` |
-| `KISANSAATHI_EMBEDDING_MODEL_NAME` | `BAAI/bge-m3` | Sentence-transformer embedding model |
-| `KISANSAATHI_RERANKER_MODEL_NAME` | `BAAI/bge-reranker-v2-m3` | Cross-encoder reranker model |
-| `KISANSAATHI_EMBEDDING_DIMENSION` | `1024` | Vector dimension for the Qdrant collection |
-| `KISANSAATHI_QDRANT_STORAGE_PATH` | `data/qdrant` | Local Qdrant persistent storage directory |
-| `KISANSAATHI_QDRANT_COLLECTION_NAME` | `kisansathi_chunks` | Qdrant collection name |
-| `KISANSAATHI_BM25_STORAGE_PATH` | `data/bm25.sqlite3` | SQLite FTS5 BM25 database |
-| `KISANSAATHI_SOURCES_MANIFEST` | `data/sources.json` | Source manifest used for citations; override when the deployed layout differs from a repository checkout |
-| `KISANSAATHI_VISION_PROVIDER` | `fake` | Vision provider: `fake` or `gemini` |
-| `KISANSAATHI_VISION_API_KEY` | (required for gemini) | Gemini API key from Google AI Studio |
-| `KISANSAATHI_VISION_MODEL_NAME` | `gemini-1.5-flash-latest` | Gemini model name |
-| `KISANSAATHI_VISION_TIMEOUT_SECONDS` | `15.0` | Total request timeout |
-| `KISANSAATHI_VISION_CONNECT_TIMEOUT_SECONDS` | `5.0` | Connection timeout |
-| `KISANSAATHI_VISION_MAX_RETRIES` | `2` | Max retry attempts for transient failures |
-| `KISANSAATHI_VISION_RETRY_BACKOFF_BASE` | `1.0` | Exponential backoff base (seconds) |
-| `KISANSAATHI_VISION_MAX_IMAGE_BYTES` | `10485760` | Max image size (10 MB) |
-| `KISANSAATHI_VISION_TEMPERATURE` | `0.0` | Generation temperature (0 = deterministic) |
-| `KISANSAATHI_VISION_MAX_OUTPUT_TOKENS` | `1024` | Max output tokens |
-| `KISANSAATHI_LOG_LEVEL` | `INFO` | Logging level for entry points |
+Documents are added by hand only after the issuing authority and official source URL have been verified. `data/sources.json` records one entry per logical document (authority, official URL, publication/effective dates); an HTTPS URL or a government-looking hostname alone is not treated as proof of authority. Unknown dates remain null.
 
-**Never commit API keys.** Use a secret manager or a gitignored `.env` file.
+- Raw PDFs are retained under `data/raw/`, keyed by SHA-256 checksum (gitignored).
+- Extracted, chunked records are written to versioned JSONL under `data/processed/` (~77 KB) and committed to the repository. Ingestion is deterministic: re-running unchanged inputs changes nothing.
+- Every evaluation benchmark records `corpus_version` checksums that tie labels to the exact committed chunks.
 
-Both models load lazily when first used; their weights may need to be downloaded then. BM25 uses the Python standard library's SQLite FTS5 support; Qdrant uses local persistent storage. Neither store indexes PDFs automatically; build the indexes explicitly (see [Indexes](#indexes)).
+Current corpus (2 documents):
 
-## Official source ingestion
+| Document | Jurisdiction |
+|---|---|
+| PM-KISAN revised FAQ | India (central scheme) |
+| Maharashtra PM-KISAN Crop Damage Incentive (PDMC) 2026–27 notification | Maharashtra |
 
-Only add documents after manually verifying the issuing authority and official source URL. Record one source per logical document in `data/sources.json`; an HTTPS URL or government-looking hostname alone does not establish authority. Unknown publication or effective dates should remain null.
+## Retrieval Pipeline
 
-Place each reviewed PDF under `data/incoming/` at the relative path in its manifest entry, then run:
+Three retrievers are implemented over the same processed corpus:
 
-```powershell
-python -m kisansathi.ingestion
+- **Dense** — `DenseRetriever` + `EmbeddingService` (BGE-M3) over the local Qdrant collection.
+- **BM25** — `BM25Retriever` over a SQLite FTS5 index.
+- **Hybrid** — `HybridRetriever` fuses dense and BM25 rankings with Reciprocal Rank Fusion.
+
+A `Reranker` rescores a bounded candidate set (default `candidate_depth=10`, `top_k=5`) with query–document cross-encoder relevance; it is a second stage used by the evaluation harness (`RerankedHybridRetriever`) and is separate from dense, BM25, and RRF scoring.
+
+The current production graph uses the dense retriever for the retrieval route. Both indexes are derived artifacts — rebuilt from the committed processed corpus, never committed themselves:
+
+```
+python -m kisansathi.build_indexes                # dense + BM25
+python -m kisansathi.build_indexes --dense-only   # embeddings only
+python -m kisansathi.build_indexes --bm25-only    # lexical only
 ```
 
-The command reads only the local manifest and files; it does not download documents. Originals are retained under `data/raw/` using their SHA-256 checksum, and extracted page/chunk records are written under `data/processed/`. The processed corpus is small (~77 KB) and **is committed to the repository**; the raw PDFs and your `data/incoming/` files are gitignored. Re-running unchanged inputs preserves existing versions and produces deterministic processed output.
+Per-file errors are reported on stderr without aborting the run; the command exits non-zero if any file failed.
 
-The parser handles text-based PDFs only. Empty or scanned documents are reported for manual review; OCR is not included. Heading detection uses PDF font/style signals and falls back to paragraph-based chunks when no headings are detected.
+## Multimodal Capabilities
 
-## Indexes
+**Vision.** `VisionAnalyzer` is an injectable protocol; domain code depends only on it. Results are structured `VisualObservation` objects with explicit uncertainty ("symptoms consistent with", confidence scores) — observations, never diagnoses. A successful observation can augment the retrieval query, but it never bypasses document grounding. The default provider is a deterministic fake; `GeminiVisionAnalyzer` is opt-in via `KISANSAATHI_VISION_PROVIDER=gemini` plus an API key. It sends the key in the `x-goog-api-key` header (never in the URL), validates image MIME/magic bytes/size/dimensions before the provider call, demands and schema-validates structured JSON output, retries only transient failures (429, 5xx, timeout), and never logs keys, image bytes, or full payloads. A real-provider contract test exists but is opt-in and skipped in CI. When an image is uploaded and the analyzer is unavailable, the request abstains; text-only requests never invoke vision and are unaffected.
 
-Both retrieval indexes are derived artifacts: they rebuild from the committed processed corpus and are never committed themselves.
+**Weather.** `OpenMeteoClient` returns typed forecast data (no API key) and requires explicit latitude/longitude — the UI never infers a location. The weather route bypasses citations (weather has no document evidence) and reports "unavailable" on client failure or missing measurements instead of failing the app.
 
-```powershell
-python -m kisansathi.build_indexes                # dense (Qdrant) + BM25
-python -m kisansathi.build_indexes --bm25-only    # lexical index only
-python -m kisansathi.build_indexes --dense-only   # embedding index only
+**Voice.** The UI accepts audio upload, but no production speech-to-text provider is configured. The `speech_to_text` boundary validates audio (`validate_audio_input`) and, when a provider is injected, transcribes and validates the result before routing; with no provider, audio is left untranscribed and the UI states that transcription is unavailable.
+
+## Eligibility
+
+The PM-KISAN evaluator (`kisansathi.eligibility`) answers eligibility questions from an explicit, versioned rule set in which every condition cites a verbatim excerpt of an ingested chunk. Facts arrive through a caller-supplied tri-state request ("Not sure" / "Yes" / "No"); facts are never parsed out of free text, because inferring a farmer's landholding or income-tax status from keywords would silently produce a wrong verdict about a real benefit. Absent or malformed requests yield clarification, and conditions the corpus does not support (including the commonly assumed two-hectare land cap) return insufficient information rather than a guess.
+
+## Grounded Responses & Citations
+
+The citation layer records *where an answer came from*; it does not assert that the source is factually correct. The flow is retrieval/eligibility → `resolve_citations` → generation → `validate_and_attach_citations` → guardrails → response.
+
+- `ManifestSourceRegistry` loads `data/sources.json`; `CitationResolver` turns requested chunk IDs into validated citations.
+- Citation IDs are structured URIs (`source_id:chunk_id`); malformed IDs, unknown sources, invalid page ranges, and unsupported schemes are rejected.
+- Post-generation, every citation referenced by the answer is re-validated against the resolved batch; a hallucinated ID forces clarification or abstention.
+- If the manifest cannot be loaded, the resolver is disabled and responses cite nothing rather than fabricate sources.
+
+When no answer generator is configured (the current default), the retrieval route returns the retrieved evidence with its resolved citations and a deterministic placeholder note; eligibility and weather responses are fully formed.
+
+## Guardrails
+
+A single deterministic layer (`kisansathi.guardrails`) runs after citation/generation processing, before the response is finalized:
+
+| Situation | Behavior |
+|---|---|
+| Successful grounded answer | Answered with validated citations |
+| Empty retrieval / no relevant chunks | **ABSTAINED** |
+| Missing or insufficient eligibility facts | **NEEDS_CLARIFICATION** (never a guess) |
+| Invalid / unregistered citation | Safe failure (abstain, no fabrication) |
+| Malformed generation or hallucinated citation ID | Clarify or abstain |
+| LLM/provider failure | **ABSTAINED** |
+| Vision unavailable | Does not block independent text routes |
+| Weather client failure | Weather reports unavailable; app unaffected |
+| Internal graph error | UI shows one fixed safe message; details logged server-side only |
+
+## Evaluation
+
+The automated suite runs **771 passed tests (11 skipped)** with zero network calls:
+
 ```
-
-Run from the project root after ingestion (and after any corpus change). Dense indexing loads the embedding model on first run. Per-file errors are reported on stderr without aborting the run; the command exits non-zero if any file failed.
-
-## Streamlit UI
-
-The project ships a mobile-friendly web UI as an optional extra:
-
-```powershell
-python -m pip install -e ".[ui]"
-python -m streamlit run src/kisansathi/ui/streamlit_app.py
-```
-
-The UI is a thin presentation layer over the existing application boundaries:
-
-- `kisansathi.ui.streamlit_app` renders inputs and responses; it never calls Qdrant, Gemini, Whisper, or eligibility rules directly.
-- `kisansathi.ui.helpers` holds pure, Streamlit-free presentation helpers (request-state building, citation formatting, status labels/footers, location and eligibility-fact parsing), covered by `tests/test_ui_helpers.py`.
-- `kisansathi.ui.composition_root.build_application_service` assembles the real application: a dense retriever over the local Qdrant collection, the Open-Meteo weather client, a citation resolver over the tracked `data/sources.json` manifest (overridable with `KISANSAATHI_SOURCES_MANIFEST`), the deterministic PM-KISAN eligibility evaluator, the configured vision provider, and the deterministic language detector. Every dependency is overridable at the call site, and the service is cached once per process with `st.cache_resource`.
-
-Inputs: question text, language (English/Hindi/Kannada/Telugu), an optional crop image, optional audio, explicit latitude/longitude for weather, and optional PM-KISAN facts as tri-state selections ("Not sure" / "Yes" / "No"). The UI never infers a location, never parses facts out of free text, and never applies eligibility rules itself; facts the farmer does not know reach the eligibility engine as missing. Responses render by status — answered, needs clarification, abstained — with sources in an expander and status-specific footers; unexpected graph failures surface one fixed safe message while details are logged server-side only.
-
-## Deployment
-
-The deployment target is a **single-process virtual private server**: a Linux venv running the Streamlit app under systemd. No containerization is used in this milestone.
-
-Why not Streamlit Community Cloud or a free HF Space? The bundled CPU-only torch and the fp32 `BAAI/bge-m3` weights (2.3 GB) comfortably exceed Community Cloud's ~2.7 GB memory budget. A ~2 vCPU / 8 GB RAM / 40 GB disk VPS (~$5–10/month) gives the app headroom (estimated peak 3.5–4.5 GB) plus room for the ~6.4 GB of model weights already cached locally.
-
-### Recommended steps
-
-1. Provision a VM (2 vCPU, 8 GB RAM, 40 GB disk is comfortable).
-2. Clone the repository and create the venv:
-   ```bash
-   python3.12 -m venv .venv
-   ./.venv/bin/activate
-   # Install CPU-only torch first so the default GPU wheel is not pulled.
-   pip install torch --index-url https://download.pytorch.org/whl/cpu
-   pip install -e ".[ui]"
-   ```
-3. Create `.env` with the `KISANSAATHI_*` values you need (see [Configuration](#configuration)) and restrict permissions:
-   ```bash
-   chmod 600 .env
-   ```
-4. Build the retrieval indexes (downloads model weights on first run):
-   ```bash
-   python -m kisansathi.build_indexes
-   ```
-5. Run the app under systemd. Example unit `/etc/systemd/system/kisansathi.service`:
-   ```ini
-   [Unit]
-   Description=KisanSaathi Streamlit app
-   After=network-online.target
-
-   [Service]
-   User=kisansathi
-   WorkingDirectory=/opt/kisansathi
-   EnvironmentFile=/opt/kisansathi/.env
-   ExecStart=/opt/kisansathi/.venv/bin/python -m streamlit run \
-       src/kisansathi/ui/streamlit_app.py
-   Restart=always
-   RestartSec=5
-   Environment=PYTHONUNBUFFERED=1
-
-   [Install]
-   WantedBy=multi-user.target
-   ```
-   Then `systemctl enable --now kisansathi`. Health is available at `/_stcore/health` (returns `"ok"`); per-run failures are logged server-side only.
-6. To update: `git pull`, re-run the index build if the corpus changed, then `systemctl restart kisansathi`.
-7. Optional pinning: generate a full lockfile with `pip freeze > requirements.lock` on the server. It is documented here rather than committed because the project's direct pins in `pyproject.toml` are the source of truth.
-
-### Deployment notes
-
-- Single-user development focus: no authentication, reverse proxy, or TLS is configured in this milestone.
-- Use an absolute `KISANSAATHI_SOURCES_MANIFEST` in the unit's `.env` if the checkout layout differs from the repo default.
-- Logging is governed by `KISANSAATHI_LOG_LEVEL` and goes to stderr, which systemd collects via `journalctl -u kisansathi`.
-
-## Demo workflow
-
-1. Start the app (see [Streamlit UI](#streamlit-ui)) and open `http://localhost:8501`.
-2. Ask an eligibility question such as *"Which farmer families are eligible for PM-KISAN benefits?"* and verify the answer cites the tracked `data/sources.json` sources in the expander.
-3. Upload a crop image and confirm the response reports the vision observation (with the fake provider, a deterministic placeholder) instead of a diagnosis.
-4. Ask a weather question with explicit latitude/longitude and confirm the weather route returns without document citations.
-5. Prove restart safety: kill the process, restart it, and confirm repeat questions answer identically (the corpus and indexes are unchanged).
-6. On the VPS: `curl http://<host>:8501/_stcore/health` returns `ok` and `systemctl status kisansathi` shows the service active.
-
-## Run checks
-
-```powershell
 python -m pytest -q
 python -m compileall -q src tests
 ```
 
-The full automated suite passes (over 750 tests) and makes zero network calls. `ruff check .` is available after installing the development extra.
+Versioned, hand-labeled benchmarks live under `data/evaluation/` and are pinned to the processed-corpus checksums. Evaluation is split into deliberately separate tiers:
 
-## Retrieval evaluation
+1. **Deterministic checks (CI)** — retrieval hit/recall, citation validity, eligibility verdicts, answer-language matching, safety/refusal behavior, guardrail statuses.
+2. **Deterministic retrieval benchmark** — `python -m kisansathi.evaluation`, a hand-labeled 10-query English set over the built dense and BM25 stores (no LLM involved).
+3. **Semantic answer-quality (opt-in)** — `python -m kisansathi.evaluation.main answer-quality` scores faithfulness, answer relevance, context precision, and context recall against a RAGAS-style adapter over the `LLMJudge` protocol. It runs only when invoked explicitly and uses `FakeLLMJudge` (no API calls) by default; the report records `judge_provider`/`judge_model` metadata so a fake judge's scores are never mistaken for a real model's. This command is evaluation infrastructure, not a statement about answer quality today.
 
-The hand-labeled English baseline is `data/evaluation/retrieval_en_v1.json`, tied to the exact processed corpus checksums in its `corpus_version`. Run it from the project root with `python -m kisansathi.evaluation` after explicitly populating the dense and BM25 stores. The evaluator compares DenseRetriever, BM25Retriever, HybridRetriever, and HybridRetriever followed by Reranker, reporting per-query results and aggregate metrics.
+### Multilingual evaluation
 
-The project's primary `recall_at_5` is Hit Rate@5: a query scores 1 if at least one relevant chunk is in the top five, otherwise 0. True Recall@5 is also reported as the per-query fraction of relevant chunks found in the top five, macro-averaged across queries. Labels are hand-reviewed against the source documents to avoid circularly judging systems by their own results. Since labels point to chunk IDs, re-ingestion or changed chunking requires reviewing and updating the affected labels.
+`python -m kisansathi.evaluation.main multilingual` reports per-language Hit@K and Recall@K (`data/evaluation/retrieval/retrieval_{lang}_v{n}.json`):
 
-Measured on the current 10-query English benchmark (dense + BM25 stores built from this corpus): Dense Hit@5 0.80, BM25 Hit@5 0.90, Hybrid Hit@5 0.90, Hybrid+Reranker Hit@5 0.90, Recall@5 0.90. This is a small benchmark, not a statistically significant result.
+| Language | Genuine relevance labels | Status |
+|---|---|---|
+| English | 10 hand-labeled queries | Evaluated |
+| Hindi | None yet | Unavailable — genuine labels do not yet exist |
+| Kannada | None yet | Unavailable — genuine labels do not yet exist |
+| Telugu | None yet | Unavailable — genuine labels do not yet exist |
+| Marathi | None (source exists, bilingual) | Not a target evaluation language |
 
-## Multilingual retrieval evaluation
+No multilingual retrieval metric is reported until genuine relevance labels exist for that language; mechanical translation of English queries is explicitly not an acceptable substitute. Unavailable languages are reported as unavailable, never as 0.0.
 
-A `kisansathi.evaluation.multilingual` module provides **cross-language retrieval evaluation** with per-language Hit@K and Recall@K metrics. This is **separate from answer-quality evaluation** — it measures "Did we retrieve the right evidence?" not "Did the answer use evidence correctly?"
+## Results
 
-### Current Language Coverage
+Measured on the current English benchmark (`data/evaluation/retrieval_en_v1.json`, 10 queries, labels hand-reviewed against the source documents, dense + BM25 stores built from the committed corpus):
 
-| Language | Source Documents | Genuine Labels | Status |
-|----------|-----------------|----------------|--------|
-| English | PM-KISAN FAQ, MH PDMC | 10 queries | **Available** |
-| Hindi | None | None | **Unavailable** |
-| Kannada | None | None | **Unavailable** |
-| Telugu | None | None | **Unavailable** |
-| Marathi | MH PDMC (bilingual) | None | **Excluded** — not a target evaluation language |
+| System | Hit@5 | Recall@5 |
+|---|---|---|
+| Dense | 0.80 | 0.80 |
+| BM25 | 0.90 | 0.8333 |
+| Hybrid (RRF) | 0.90 | 0.85 |
+| Hybrid + Reranker | **0.90** | **0.90** |
 
-**No multilingual retrieval metric is reported until genuine relevance labels exist for that language.**
+These numbers are reproducible from this repository. The benchmark is English-only, 10 queries, small and directional, and **not statistically representative**. It is not a claim about production-scale performance.
 
-### Metrics
+## Current Limitations
 
-- **Hit@5**: Fraction of queries with ≥1 relevant chunk in top 5
-- **Recall@5**: Macro-averaged fraction of relevant chunks found in top 5 (primary metric)
-- **Retrieval Gap**: English Recall@5 − Target Language Recall@5 (only when both have genuine labels)
+- **Small English benchmark** — single 10-query set; no confidence intervals.
+- **Small corpus** — two official documents; the assistant does not cover all Indian schemes.
+- **Multilingual labels unavailable** — Hindi, Kannada, and Telugu have no genuine relevance labels; Marathi is not a target evaluation language. No multilingual retrieval score exists.
+- **No production answer generator** — retrieval answers are deterministic placeholders describing what was retrieved; a real LLM provider is a planned integration (only investment: implement the `LLMClient` protocol and inject a `DefaultAnswerGenerator`).
+- **No production speech-to-text** — audio upload is accepted but not transcribed.
+- **Vision provider dependency** — defaults to a deterministic fake; real analysis requires the opt-in Gemini provider and an API key. Vision output is observation-level and uncertain, never a diagnosis.
+- **Answer-quality judge limitations** — scores carry judge bias/variance, no significance testing, and are not comparable across judge providers.
+- **Model / resource requirements** — BGE-M3 (~2.3 GB) and reranker (~2.1 GB) weights download lazily on first use; dense retrieval needs ~8 GB RAM for comfortable headroom.
+- **Deployment limitations** — single-process VPS deployment; no load balancing, authentication, reverse proxy, or TLS.
+- **Extraction limitations** — text-based PDFs only; no OCR and no automatic PDF downloading; documents are added by hand after authority verification.
 
-### Architecture
+## Local Setup
 
-- **Per-language versioned benchmarks**: `data/evaluation/retrieval/retrieval_{lang}_v{n}.json`
-- **Unavailable language handling**: Explicit `unavailable=true` with reason; never reported as 0.0
-- **Reproducibility metadata**: Benchmark version, corpus checksum, retrieval config, K, timestamp, evaluator version
-- **Native-speaker annotation workflow**: Queries authored by native speakers; relevance judged against source documents
-- **No mechanical translation**: Translated English queries are NOT valid benchmarks
-
-### CLI
-
-```powershell
-python -m kisansathi.evaluation.main multilingual ^
-  --base-path data/evaluation/retrieval ^
-  --output-jsonl output/multilingual.jsonl ^
-  --output-markdown output/multilingual.md ^
-  --language en  # optional: filter to specific language (en/hi/kn/te/all)
-```
-
-### Native Annotation Requirements
-
-Before reporting a Hindi/Kannada/Telugu retrieval score:
-
-1. Add source documents in that language to `data/sources.json` and `data/incoming/`
-2. Ingest documents (`python -m kisansathi.ingestion`)
-3. Native speaker formulates real farmer queries in that language
-4. Native speaker identifies relevant chunks from the corpus for each query
-5. Second native speaker validates (target Cohen's kappa ≥ 0.8)
-6. Write benchmark JSON with all metadata
-7. Run evaluation via CLI
-
-## Answer generation
-
-A `kisansathi.generation` package provides an injectable `AnswerGenerator` protocol with a `DefaultAnswerGenerator` implementation. The LangGraph orchestration adds a `generate_answer` node (after `resolve_citations`) and a `validate_and_attach_citations` node on the retrieval and eligibility paths. `build_graph` accepts a keyword-only `answer_generator` parameter; when absent, routes behave exactly as before with deterministic placeholder responses. The generator receives a `GenerationContext` (message, resolved `CitationBatch`, eligibility decision, weather, vision_result) and returns a structured `GeneratedAnswer`. The prompt explicitly forbids external knowledge, requires inline citation IDs from an allowlist, and demands the requested language. Model output is parsed as `ANSWER:` / `CITATIONS:` sections; cited IDs are validated against the resolved batch, then re-validated post-generation via `validate_referenced_citations`. LLM failures yield `ABSTAINED`; malformed output or hallucinated citation IDs yield `NEEDS_CLARIFICATION`. Weather and clarification routes bypass generation entirely. No LLM provider is hard-coded; tests use a `FakeLLMClient` and `FakeAnswerGenerator`.
-
-## Answer quality evaluation
-
-A `kisansathi.evaluation.answer_quality` module provides **semantic answer quality metrics** using an LLM judge (RAGAS-compatible adapter). This is **separate from deterministic checks** in `kisansathi.evaluation.answer` and **opt-in only** — it does not run as part of normal pytest.
-
-### Metrics
-
-- **Faithfulness**: Does the generated answer stay faithful to retrieved contexts?
-- **Answer Relevance**: Is the answer relevant to the query?
-- **Context Precision**: Are retrieved contexts relevant (vs reference contexts)?
-- **Context Recall**: Do retrieved contexts cover reference contexts? (Only when reference contexts exist)
-
-### Architecture
-
-- **Provider-agnostic `LLMJudge` protocol** — inject any LLM provider; `FakeLLMJudge` for deterministic tests
-- **Prompt-injection safe** — evaluation prompts explicitly forbid following instructions in retrieved/generated content
-- **Missing-input handling** — metrics unavailable when required inputs missing; no fake scores substituted
-- **Reproducibility metadata** — records benchmark version, judge provider/model, temperature, timestamp, config
-- **No API keys in logs/reports**
-
-### Benchmark
-
-Hand-authored English dataset: `data/evaluation/answer_quality/answer_quality_en_v1.json` (5 cases, tied to corpus checksums). No multilingual answer-quality labels fabricated — Hindi/Kannada/Telugu not reported without real labels.
-
-### CLI (opt-in)
+**Prerequisites:** Python 3.12.
 
 ```powershell
-python -m kisansathi.evaluation.main answer-quality ^
-  --dataset data/evaluation/answer_quality/answer_quality_en_v1.json ^
-  --output-jsonl output/answer_quality.jsonl ^
-  --output-markdown output/answer_quality.md
+py -3.12 -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"          # + pytest, ruff, compileall
+python -m pip install -e ".[ui]"           # + Streamlit UI
 ```
 
-Uses `FakeLLMJudge` by default (no API calls). Real judges are implemented programmatically via the `LLMJudge` protocol.
+**Environment variables.** Copy `.env.example` to `.env` for local values, or export the `KISANSAATHI_*` variables. Settings are read from process environment variables only (`.env` files are not parsed automatically). Key variables:
 
-### Limitations
+| Variable | Default | Description |
+|---|---|---|
+| `KISANSAATHI_ENV` | `development` | `development`, `test`, `production` |
+| `KISANSAATHI_DEFAULT_LANGUAGE` | `en` | Default UI language: `en` or `hi` |
+| `KISANSAATHI_EMBEDDING_MODEL_NAME` | `BAAI/bge-m3` | Embedding model |
+| `KISANSAATHI_RERANKER_MODEL_NAME` | `BAAI/bge-reranker-v2-m3` | Reranker model |
+| `KISANSAATHI_QDRANT_STORAGE_PATH` | `data/qdrant` | Local Qdrant storage directory |
+| `KISANSAATHI_BM25_STORAGE_PATH` | `data/bm25.sqlite3` | SQLite FTS5 BM25 database |
+| `KISANSAATHI_SOURCES_MANIFEST` | `data/sources.json` | Source manifest used for citations |
+| `KISANSAATHI_VISION_PROVIDER` | `fake` | `fake` or `gemini` |
+| `KISANSAATHI_VISION_API_KEY` | (empty) | Required only for the Gemini provider |
+| `KISANSAATHI_LOG_LEVEL` | `INFO` | Logging level for entry points |
 
-- Judge bias/variance affects scores
-- No confidence intervals or statistical significance
-- Results not comparable across different judge providers/models/configurations
-- Context precision/recall require reference contexts (unavailable when missing)
+**Never commit `.env` or real API keys.** The full variable inventory is documented in `.env.example`.
 
-## Vision analysis
+## Running the Application
 
-A `kisansathi.vision` package provides an injectable `VisionAnalyzer` protocol. The domain layer depends only on this protocol; concrete providers live in `kisansathi.vision.providers`.
+**Prepare the corpus and indexes.** The processed corpus is committed; build the derived indexes before starting (first dense build downloads the embedding weights):
 
-**Current provider**: Google Gemini (multimodal LLM) via `GeminiVisionAnalyzer`. The API key travels in the `x-goog-api-key` header, never in the URL. All normal tests use `FakeVisionAnalyzer` — no network calls, no API keys required.
+```
+python -m kisansathi.build_indexes
+```
 
-**Architecture**:
-- `VisionAnalyzer.analyze(image_bytes, content_type, ...)` → `VisionResult`
-- `VisionResult` contains structured `VisualObservation` objects with explicit uncertainty
-- Observations are NEVER definitive diagnoses — they use "symptoms consistent with", "possibly", confidence scores
-- Vision output is an OBSERVATION, not evidence. It augments retrieval queries but never bypasses document grounding
-- Provider failures map to domain exceptions: `AnalyzerUnavailableError`, `AnalyzerTimeoutError`, `ImageValidationError`, etc.
+Ingestion is only needed when adding new documents: place reviewed PDFs under `data/incoming/` per their `data/sources.json` entry, then run `python -m kisansathi.ingestion`.
 
-**Provider behavior**:
-- Validates image (MIME, magic bytes, size, dimensions) BEFORE provider call
-- Sends tightly constrained prompt demanding structured JSON output
-- Validates provider response against `VisionResult` schema before returning
-- Retries ONLY transient failures (429, 5xx, timeout); never retries auth, 400, or malformed output
-- Structured logging: provider, model, latency, status, retry count, confidence distribution
-- NEVER logs: API keys, raw image bytes, full request/response payloads
+**Start the UI:**
 
-**Privacy**:
-- Image bytes held in memory only during request; discarded immediately after
-- No disk persistence of images
-- Provider retention policy documented (Gemini API: no training on API data)
+```
+python -m streamlit run src/kisansathi/ui/streamlit_app.py
+```
 
-**Testing**:
-- Normal CI: `FakeVisionAnalyzer` only, zero network calls
-- Contract tests (manual): `tests/contract/test_gemini_vision_contract.py` skipped unless `RUN_REAL_VISION_TESTS=1` and `GEMINI_API_KEY` set
+The UI accepts a free-text question, a language selector, optional image, optional audio, explicit latitude/longitude for weather, and optional PM-KISAN facts as tri-state selections. Responses render by status — answered / needs clarification / abstained — with sources in an expander and status-specific footers. Example flows that work today: ask *"Which farmer families are eligible for PM-KISAN benefits?"* (cites the tracked sources), upload a crop image (an observation from the fake provider, not a diagnosis), or ask a weather question with explicit coordinates (returns without document citations).
 
-## Current scope
+## Deployment
 
-`HybridRetriever` combines dense and BM25 rankings with Reciprocal Rank Fusion. `Reranker` can then rescore a bounded candidate set with query-document CrossEncoder relevance scores; this second-stage operation is separate from dense, BM25, and RRF scoring. A deterministic LangGraph orchestration skeleton (`kisansathi.orchestration`) routes messages to clarification, retrieval, eligibility, or weather and returns a final `AssistantResponse`; it injects a retriever, a weather client, a citation resolver, and an eligibility evaluator as dependencies and intentionally omits LLM, vision, Whisper, translation, TTS, tools, checkpointer, and external services. Both evidence routes converge on one `resolve_citations` node, so the graph selects evidence and attaches whatever the resolver returns while the resolver alone decides what is citable; the graph never constructs a `Citation` itself and never reads chunk text. The weather route is deliberately left independent from the citation layer and does not reach the resolver, because weather carries no document evidence. A weather tool (`kisansathi.weather`) provides typed Open-Meteo integration (forecast API, no API key) with transport isolation and network-free tests; it is independent from LangGraph for this milestone. A deterministic eligibility evaluator (`kisansathi.eligibility`) answers PM-KISAN questions from an explicit, versioned rule set whose every condition cites a verbatim excerpt of an ingested corpus chunk; it is a pure function and is injected into the graph rather than imported by it. Its facts are read from a caller-supplied `eligibility_request` and are never parsed out of message text, because inferring a farmer's landholding or tax status by keyword would silently produce a wrong verdict about a real benefit; an absent or malformed request yields insufficient information or a clarification instead of a guess. Conditions the corpus does not support (including the commonly assumed two-hectare land cap) are not encoded in the rules.
+The current target is a **single-process virtual private server**: a Linux venv running the Streamlit app under systemd. No containerization, authentication, reverse proxy, or TLS is configured.
 
-## Known limitations
+1. Provision a VM (~2 vCPU / 8 GB RAM / 40 GB disk).
+2. Clone the repository and create the venv; install CPU-only torch first so the default GPU wheel is not pulled, then `pip install -e ".[ui]"`.
+3. Create a `chmod 600` `.env` with the needed `KISANSAATHI_*` values (use absolute index and storage paths).
+4. Build the retrieval indexes: `python -m kisansathi.build_indexes` (downloads model weights on first run).
+5. Run under systemd (`EnvironmentFile=/opt/kisansathi/.env`, `ExecStart=/opt/kisansathi/.venv/bin/python -m streamlit run src/kisansathi/ui/streamlit_app.py`, `Restart=always`). Health check: `curl http://<host>:8501/_stcore/health` → `"ok"`. Logs go to stderr, collected via `journalctl -u kisansathi`.
+6. Update by `git pull`, rebuilding indexes if the corpus changed, then `systemctl restart kisansathi`.
 
-- **No production answer generator or speech-to-text is configured**, so retrieval answers are deterministic placeholders and uploaded audio reaches the speech boundary without transcription. The UI help text states this rather than implying Whisper runs.
-- **The vision provider defaults to `fake`.** Real image observations require the Gemini provider and a key; the contract test is opt-in and disabled in CI.
-- **Multilingual retrieval is measured for English only** (10 queries). Hindi, Kannada, and Telugu show no score until real labels exist.
-- **No OCR.** Empty or scanned PDFs are flagged for manual review, not transcribed.
-- **No automatic PDF downloads.** Documents are added by hand after verifying the issuing authority.
-- **First use downloads model weights** (BGE-M3 ~2.3 GB + reranker ~2.1 GB), so the app needs network access on first run.
-- **One server, one process.** There is no load balancing, no auth, and no TLS in this milestone.
+The bundled CPU torch and fp32 BGE-M3 weights exceed free managed tiers (e.g. Streamlit Community Cloud's ~2.7 GB memory budget), so a ~2 vCPU / 8 GB RAM VPS is used to give the estimated 3.5–4.5 GB peak working set headroom.
 
-## Data, evaluation, and portfolio claims
+## Project Structure
 
-- The processed corpus (`data/processed/`, ~77 KB) is committed; raw PDFs, `data/incoming/`, model weights, and generated indexes are not. Model caches (if ever pointed inside the repo) live under `hf_cache/`, which is ignored.
-- All retrieval and answer-quality metrics are tied to versioned benchmark files whose `corpus_version` pins the processed corpus checksums; labels are hand-reviewed against the source documents.
-- No multilingual metric is invented. Where labels do not exist, the benchmarks record the language as explicitly unavailable rather than reporting 0.0 or translated-query scores.
-- Every claim that would appear in a portfolio is reproducible from this repository: the committed corpus, the pinned dependencies in `pyproject.toml`, the index-build CLI, and the deterministic test suite.
-
-## Interview talking points
-
-- **Why the architecture is trustworthy**: evidence code paths converge on a single resolve-citations node, and the resolver alone decides what is citable; the orchestration graph never constructs a citation itself.
-- **Why retrieval is honest**: hybrid dense/BM25 retrieval with RRF plus a lazy reranker is measured on hand-labeled English queries (Hit@5 0.90 on the current small benchmark), with the number and vocabulary of labels openly stated.
-- **Why the UI does not pretend**: no location inference, no free-text fact parsing, no fake speech transcription, no fake vision — capabilities and boundaries are stated in the UI itself.
-- **Why deployment is a single VPS process**: the model weight and library footprint (bundled CPU torch ~1.4 GB, fp32 embeddings, ~3.5–4.5 GB peak working set) is too large for free single-app tiers, and a systemd-managed venv is restart-safe, observable, and cheap.
-- **Why secrets are handled defensively**: API keys travel in headers, not URLs; `.env` is gitignored; nothing secret is ever logged.
+```
+src/kisansathi/
+├── ingestion/            # PDF -> chunked JSONL pipeline (data/processed)
+├── retrieval/            # embeddings, dense/BM25/hybrid retrievers, reranker, stores
+├── orchestration/        # LangGraph graph + nodes (graph.py)
+├── eligibility/          # deterministic PM-KISAN rule evaluator
+├── citations/            # source manifest registry + citation resolver
+├── generation/           # AnswerGenerator + LLMClient protocol
+├── guardrails/           # final abstention / clarification policy
+├── language/             # deterministic script-based language detector
+├── weather/              # Open-Meteo client
+├── voice/                # SpeechToText contract + audio validation
+├── vision/               # VisionAnalyzer protocol + fake/Gemini providers
+├── ui/                   # Streamlit app, presentation helpers, composition root
+├── evaluation/           # retrieval / answer / answer-quality / multilingual harness
+├── domain/               # shared schemas (responses, citations, requests)
+├── config.py             # environment-backed settings
+├── build_indexes.py      # dense + BM25 index-build CLI
+└── logging_setup.py      # entry-point logging configuration
+data/
+├── sources.json          # tracked source manifest
+├── processed/            # committed chunk corpus (v1)
+├── evaluation/           # versioned retrieval/answer/answer-quality benchmarks
+└── (incoming/, raw/, qdrant/, bm25.sqlite3)   # gitignored working artifacts
+tests/
+├── test_*.py             # 38 modules of unit + integration tests
+└── contract/             # opt-in real-provider tests (skipped in CI)
+```

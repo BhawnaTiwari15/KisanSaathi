@@ -10,6 +10,7 @@ from typing import Protocol, runtime_checkable
 from kisansathi.citations.models import CitationBatch
 from kisansathi.domain.schemas import Language, ResponseStatus, UserMessage
 from kisansathi.eligibility.models import EligibilityDecision
+from kisansathi.retrieval.vector_store import SearchResult
 from kisansathi.weather.models import WeatherResponse
 from kisansathi.vision.models import VisionResult
 
@@ -39,6 +40,7 @@ class GenerationContext:
     eligibility_decision: EligibilityDecision | None
     weather: WeatherResponse | None
     vision_result: VisionResult | None
+    retrieved_chunks: tuple[SearchResult, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

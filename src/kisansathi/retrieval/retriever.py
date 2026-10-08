@@ -35,6 +35,7 @@ class DenseRetriever:
         self._embedding_service = embedding_service
         self._vector_store = vector_store
         self._default_top_k = default_top_k
+        self._closed = False
 
     def retrieve(self, query: str, *, top_k: int | None = None) -> tuple[SearchResult, ...]:
         """Return up to ``top_k`` dense matches for a non-blank query."""
@@ -47,6 +48,17 @@ class DenseRetriever:
         self._validate_top_k(result_limit)
         query_vector = self._embedding_service.embed_query(query)
         return self._vector_store.search(query_vector, limit=result_limit)
+
+    def close(self) -> None:
+        """Close the underlying vector store if it supports closing.
+
+        Safe to call multiple times.
+        """
+        if self._closed:
+            return
+        if hasattr(self._vector_store, "close"):
+            self._vector_store.close()
+        self._closed = True
 
     @staticmethod
     def _validate_top_k(top_k: int) -> None:
