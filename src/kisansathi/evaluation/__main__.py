@@ -11,6 +11,7 @@ from kisansathi.evaluation.recall import (
     evaluate_systems,
     load_evaluation_dataset,
 )
+from kisansathi.logging_setup import configure_logging
 from kisansathi.retrieval.bm25_retriever import BM25Retriever
 from kisansathi.retrieval.bm25_store import BM25Store
 from kisansathi.retrieval.embeddings import EmbeddingService
@@ -21,6 +22,7 @@ from kisansathi.retrieval.vector_store import QdrantVectorStore
 
 
 def main() -> int:
+    configure_logging()
     parser = argparse.ArgumentParser(description="Evaluate retrieval against hand-labeled queries")
     parser.add_argument(
         "--dataset",

@@ -140,6 +140,18 @@ class TestGeminiVisionAnalyzer(unittest.TestCase):
         self.assertEqual(result.analyzer_metadata["provider"], "gemini")
 
     @patch("httpx.Client.post")
+    def test_api_key_sent_in_header_not_query_string(self, mock_post):
+        mock_post.return_value = self._make_mock_response(200, self._make_success_response())
+
+        analyzer = GeminiVisionAnalyzer(self.settings)
+        analyzer.analyze(VALID_JPEG, content_type="image/jpeg")
+
+        args, kwargs = mock_post.call_args
+        self.assertNotIn("params", kwargs)
+        self.assertNotIn("key=", args[0])
+        self.assertEqual(kwargs["headers"], {"x-goog-api-key": "test-api-key"})
+
+    @patch("httpx.Client.post")
     def test_low_confidence_observations_filtered(self, mock_post):
         """Test that observations below threshold are filtered."""
         observations = [

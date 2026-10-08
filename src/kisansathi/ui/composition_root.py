@@ -94,9 +94,10 @@ def build_application_service(
         weather_client: Defaults to the Open-Meteo client. Pass ``None`` to
             keep the weather route reachable without a client (guardrails then
             report weather as unavailable).
-        citation_resolver: Defaults to a resolver over ``data/sources.json``.
-            Pass ``None`` to publish no citations (the manifest is a tracked
-            file, so this only fails when the checkout is incomplete).
+        citation_resolver: Defaults to a resolver over ``data/sources.json``
+            (overridable with ``KISANSAATHI_SOURCES_MANIFEST``). Pass ``None``
+            to publish no citations (the manifest is a tracked file, so this
+            only fails when the checkout is incomplete).
         eligibility_evaluator: Defaults to the deterministic PM-KISAN
             evaluator. Pass ``None`` to fall back to the graph default.
         answer_generator: Defaults to ``None`` (deterministic placeholder
@@ -122,7 +123,12 @@ def build_application_service(
     if weather_client is _AUTO:
         weather_client = OpenMeteoClient()
     if citation_resolver is _AUTO:
-        citation_resolver = _default_citation_resolver()
+        manifest_path = (
+            Path(settings.sources_manifest_path)
+            if settings.sources_manifest_path is not None
+            else None
+        )
+        citation_resolver = _default_citation_resolver(manifest_path)
     if eligibility_evaluator is _AUTO:
         eligibility_evaluator = evaluate
     if answer_generator is _AUTO:

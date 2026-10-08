@@ -7,9 +7,11 @@ import sys
 from kisansathi.ingestion.manifest import ManifestError
 from kisansathi.ingestion.models import IngestionError
 from kisansathi.ingestion.pipeline import ingest_manifest
+from kisansathi.logging_setup import configure_logging
 
 
 def main() -> int:
+    configure_logging()
     parser = argparse.ArgumentParser(description="Ingest reviewed local PDFs from a source manifest")
     parser.add_argument("--manifest", default="data/sources.json")
     parser.add_argument("--root", default=".", help="Project root containing data/incoming")

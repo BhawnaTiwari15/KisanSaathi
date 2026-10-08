@@ -27,6 +27,7 @@ import streamlit as st
 
 from kisansathi.domain.schemas import Language, ResponseStatus
 from kisansathi.eligibility.models import FACT_NAMES, EligibilityRequest
+from kisansathi.logging_setup import configure_logging
 from kisansathi.ui import helpers as ui
 from kisansathi.ui.composition_root import ApplicationService, build_application_service
 
@@ -287,6 +288,7 @@ def _submit(
 
 def main() -> None:
     """Entry point for ``streamlit run``."""
+    configure_logging()
     st.set_page_config(
         page_title="KisanSaathi — Farmer Assistant",
         page_icon="🌾",

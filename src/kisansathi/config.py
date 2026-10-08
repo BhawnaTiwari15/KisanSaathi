@@ -25,6 +25,8 @@ DEFAULT_VISION_MAX_IMAGE_BYTES = 10 * 1024 * 1024
 DEFAULT_VISION_TEMPERATURE = 0.0
 DEFAULT_VISION_MAX_OUTPUT_TOKENS = 1024
 
+DEFAULT_SOURCES_MANIFEST_PATH = "data/sources.json"
+
 
 class AppEnvironment(StrEnum):
     """Supported application environments."""
@@ -81,6 +83,7 @@ class Settings:
     vision_max_image_bytes: int = DEFAULT_VISION_MAX_IMAGE_BYTES
     vision_temperature: float = DEFAULT_VISION_TEMPERATURE
     vision_max_output_tokens: int = DEFAULT_VISION_MAX_OUTPUT_TOKENS
+    sources_manifest_path: str | None = None
 
     def __post_init__(self) -> None:
         if not self.embedding_model_name.strip():
@@ -115,6 +118,8 @@ class Settings:
             raise ValueError("Vision temperature must be between 0.0 and 2.0")
         if self.vision_max_output_tokens <= 0:
             raise ValueError("Vision max output tokens must be positive")
+        if self.sources_manifest_path is not None and not self.sources_manifest_path.strip():
+            raise ValueError("Sources manifest path must not be blank")
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Settings":
@@ -194,6 +199,10 @@ class Settings:
             values.get("KISANSAATHI_VISION_MAX_OUTPUT_TOKENS", str(DEFAULT_VISION_MAX_OUTPUT_TOKENS))
         )
 
+        sources_manifest_path = values.get("KISANSAATHI_SOURCES_MANIFEST")
+        if sources_manifest_path is not None:
+            sources_manifest_path = sources_manifest_path.strip() or None
+
         return cls(
             environment=environment,
             default_language=default_language,
@@ -213,4 +222,5 @@ class Settings:
             vision_max_image_bytes=vision_max_image_bytes,
             vision_temperature=vision_temperature,
             vision_max_output_tokens=vision_max_output_tokens,
+            sources_manifest_path=sources_manifest_path,
         )

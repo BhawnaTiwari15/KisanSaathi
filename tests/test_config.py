@@ -90,6 +90,27 @@ class SettingsTests(unittest.TestCase):
             ):
                 Settings.from_env({"KISANSAATHI_EMBEDDING_DIMENSION": value})
 
+    def test_sources_manifest_path_defaults_to_none(self) -> None:
+        settings = Settings.from_env({})
+
+        self.assertIsNone(settings.sources_manifest_path)
+
+    def test_reads_sources_manifest_path(self) -> None:
+        settings = Settings.from_env(
+            {"KISANSAATHI_SOURCES_MANIFEST": "/app/data/sources.json"}
+        )
+
+        self.assertEqual(settings.sources_manifest_path, "/app/data/sources.json")
+
+    def test_blank_sources_manifest_path_becomes_none(self) -> None:
+        settings = Settings.from_env({"KISANSAATHI_SOURCES_MANIFEST": "   "})
+
+        self.assertIsNone(settings.sources_manifest_path)
+
+    def test_rejects_blank_direct_sources_manifest_path(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Sources manifest path must not be blank"):
+            Settings(sources_manifest_path="  ")
+
 
 if __name__ == "__main__":
     unittest.main()

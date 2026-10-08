@@ -1,0 +1,11 @@
+# KisanSaathi Streamlit server settings.
+# Read from the working directory that runs `streamlit run` (the project root).
+
+[server]
+# Do not auto-open a browser; the app is reached at
+# http://localhost:8501 locally and via the deploy URL remotely.
+headless = true
+
+[browser]
+# Do not send usage statistics to Streamlit.
+gatherUsageStats = false

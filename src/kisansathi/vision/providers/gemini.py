@@ -133,10 +133,10 @@ class GeminiVisionAnalyzer(BaseVisionAnalyzer):
         }
 
         url = f"{self._base_url}/{self._model}:generateContent"
-        params = {"key": self._api_key}
+        headers = {"x-goog-api-key": self._api_key}
 
         try:
-            response = self._client.post(url, params=params, json=payload)
+            response = self._client.post(url, headers=headers, json=payload)
         except httpx.TimeoutException as e:
             raise ProviderTimeoutError(f"Gemini request timed out: {e}") from e
         except httpx.ConnectError as e:
