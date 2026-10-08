@@ -22,6 +22,9 @@ _MAX_EXCERPT_CHARS = 300
 # Control characters that could be used for prompt injection.
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
+# Matches a citation ID inside brackets, tolerating trailing punctuation.
+_CITATION_ID_PATTERN = re.compile(r"\[([^\]]+)\]")
+
 
 def _sanitize_text(text: str) -> str:
     """Remove control characters and limit length to mitigate prompt injection."""
@@ -205,6 +208,7 @@ def _extract_citation_ids(raw: str) -> tuple[str, ...]:
     """Extract citation IDs from the CITATIONS section.
 
     Expected format: one ID per line, optionally with brackets.
+    Trailing punctuation after the closing bracket is tolerated.
     """
     citations_section = ""
     if "CITATIONS:" in raw:
@@ -215,10 +219,13 @@ def _extract_citation_ids(raw: str) -> tuple[str, ...]:
         line = line.strip()
         if not line:
             continue
-        # Accept [id] or id
-        if line.startswith("[") and line.endswith("]"):
-            line = line[1:-1]
-        ids.append(line.strip())
+        # Try to extract ID from inside brackets, tolerating trailing punctuation
+        match = _CITATION_ID_PATTERN.search(line)
+        if match:
+            ids.append(match.group(1).strip())
+        else:
+            # Fallback: accept bare ID (no brackets)
+            ids.append(line.strip())
     return tuple(ids)
 
 

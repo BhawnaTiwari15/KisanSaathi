@@ -312,6 +312,7 @@ class TestLLMSettings(unittest.TestCase):
         self.assertEqual(settings.llm_provider, LLMProvider.FAKE)
         self.assertIsNone(settings.llm_api_key)
         self.assertEqual(settings.llm_model_name, "gemini-3.5-flash-lite")
+        self.assertEqual(settings.llm_timeout_seconds, 60.0)
         self.assertEqual(settings.llm_temperature, 0.0)
         self.assertEqual(settings.llm_max_tokens, 512)
 

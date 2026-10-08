@@ -164,6 +164,66 @@ class TestParseGeneratedAnswer(unittest.TestCase):
         answer = parse_generated_answer(raw, allowed)
         self.assertEqual(len(answer.citation_ids), 2)
 
+    def test_citation_ids_with_trailing_period(self) -> None:
+        """Citation IDs with trailing period after closing bracket are extracted correctly."""
+        raw = (
+            "ANSWER:\nAnswer.\n\n"
+            "CITATIONS:\n[chunk-1].\n[chunk-2]."
+        )
+        answer = parse_generated_answer(raw, self.allowed_ids)
+        self.assertEqual(answer.citation_ids, ("chunk-1", "chunk-2"))
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_citation_ids_with_trailing_comma(self) -> None:
+        """Citation IDs with trailing comma after closing bracket are extracted correctly."""
+        raw = (
+            "ANSWER:\nAnswer.\n\n"
+            "CITATIONS:\n[chunk-1],\n[chunk-2],"
+        )
+        answer = parse_generated_answer(raw, self.allowed_ids)
+        self.assertEqual(answer.citation_ids, ("chunk-1", "chunk-2"))
+
+    def test_citation_ids_with_trailing_semicolon(self) -> None:
+        """Citation IDs with trailing semicolon after closing bracket are extracted correctly."""
+        raw = (
+            "ANSWER:\nAnswer.\n\n"
+            "CITATIONS:\n[chunk-1];\n[chunk-2];"
+        )
+        answer = parse_generated_answer(raw, self.allowed_ids)
+        self.assertEqual(answer.citation_ids, ("chunk-1", "chunk-2"))
+
+    def test_citation_ids_with_trailing_colon(self) -> None:
+        """Citation IDs with trailing colon after closing bracket are extracted correctly."""
+        raw = (
+            "ANSWER:\nAnswer.\n\n"
+            "CITATIONS:\n[chunk-1]:\n[chunk-2]:"
+        )
+        answer = parse_generated_answer(raw, self.allowed_ids)
+        self.assertEqual(answer.citation_ids, ("chunk-1", "chunk-2"))
+
+    def test_citation_ids_with_trailing_parenthesis(self) -> None:
+        """Citation IDs with trailing parenthesis after closing bracket are extracted correctly."""
+        raw = (
+            "ANSWER:\nAnswer.\n\n"
+            "CITATIONS:\n[chunk-1])\n[chunk-2])"
+        )
+        answer = parse_generated_answer(raw, self.allowed_ids)
+        self.assertEqual(answer.citation_ids, ("chunk-1", "chunk-2"))
+
+    def test_bare_citation_id_fallback(self) -> None:
+        """Bare citation IDs (no brackets) are still accepted as fallback."""
+        raw = (
+            "ANSWER:\nAnswer.\n\n"
+            "CITATIONS:\nchunk-1\nchunk-2"
+        )
+        answer = parse_generated_answer(raw, self.allowed_ids)
+        self.assertEqual(answer.citation_ids, ("chunk-1", "chunk-2"))
+
+    def test_invalid_citation_id_still_rejected(self) -> None:
+        """Invalid citation IDs (not in allowed list) are still rejected."""
+        raw = (
+            "ANSWER:\nAnswer.\n\n"
+            "CITATIONS:\n[unknown-chunk]"
+        )
+        with self.assertRaises(GroundingError) as cm:
+            parse_generated_answer(raw, self.allowed_ids)
+        self.assertIn("unknown", str(cm.exception).lower())
