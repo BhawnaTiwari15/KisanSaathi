@@ -1,6 +1,6 @@
 # KisanSaathi
 
-KisanSaathi is a multilingual, multimodal AI assistant for farmers. The current implementation includes the Python foundation, an offline ingestion pipeline for manually curated official PDF sources, dense, BM25, and hybrid retrieval, a lazy second-stage reranker, a local Qdrant vector-store abstraction, and explicit JSONL indexing. Automatic PDF downloading/indexing, RAG, eligibility, and user interfaces are not implemented.
+KisanSaathi is a multilingual, multimodal AI assistant for farmers. The current implementation includes the Python foundation, an offline ingestion pipeline for manually curated official PDF sources, dense, BM25, and hybrid retrieval, a lazy second-stage reranker, a local Qdrant vector-store abstraction, explicit JSONL indexing, a deterministic LangGraph orchestration with citations, eligibility, weather, vision, voice, and generation boundaries, and a mobile-friendly Streamlit UI. Automatic PDF downloading, OCR, and production LLM/speech providers are not implemented.
 
 ## Requirements
 
@@ -49,6 +49,30 @@ $env:KISANSAATHI_VISION_PROVIDER="gemini"
 $env:KISANSAATHI_VISION_API_KEY="your-gemini-api-key"
 python -m pytest tests/ -q  # Uses fake provider (no API key in CI)
 ```
+
+## Streamlit UI
+
+The project ships a mobile-friendly web UI as an optional extra:
+
+```powershell
+python -m pip install -e ".[ui]"
+.venv\Scripts\python.exe -m streamlit run src/kisansathi/ui/streamlit_app.py
+```
+
+The UI is a thin presentation layer over the existing application boundaries:
+
+- `kisansathi.ui.streamlit_app` renders inputs and responses; it never calls Qdrant, Gemini, Whisper, or eligibility rules directly.
+- `kisansathi.ui.helpers` holds pure, Streamlit-free presentation helpers (request-state building, citation formatting, status labels/footers, location and eligibility-fact parsing), covered by `tests/test_ui_helpers.py`.
+- `kisansathi.ui.composition_root.build_application_service` assembles the real application: a dense retriever over the local Qdrant collection, the Open-Meteo weather client, a citation resolver over the tracked `data/sources.json` manifest, the deterministic PM-KISAN eligibility evaluator, the configured vision provider, and the deterministic language detector. Every dependency is overridable at the call site, and the service is cached once per process with `st.cache_resource`.
+
+Inputs: question text, language (English/Hindi/Kannada/Telugu), an optional crop image, optional audio, explicit latitude/longitude for weather, and optional PM-KISAN facts as tri-state selections ("Not sure" / "Yes" / "No"). The UI never infers a location, never parses facts out of free text, and never applies eligibility rules itself; facts the farmer does not know reach the eligibility engine as missing. Responses render by status — answered, needs clarification, abstained — with sources in an expander and status-specific footers; unexpected graph failures surface one fixed safe message while details are logged server-side only.
+
+Notes:
+
+- The application service is built on first submit and only performs local file I/O; the embedding model still loads lazily on the first retrieval query and may download weights then.
+- No production LLM answer generator or speech-to-text provider is configured, so retrieval answers are deterministic placeholders and uploaded audio is passed to the boundary without transcription. The UI help text states this rather than implying Whisper runs.
+- The vision provider defaults to `fake` (see Vision Provider Configuration above).
+- The `ui` extra is not needed for tests; the suite imports the helpers only.
 
 ## Official source ingestion
 
