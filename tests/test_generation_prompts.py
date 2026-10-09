@@ -26,9 +26,30 @@ class TestBuildSystemPrompt(unittest.TestCase):
         prompt = build_system_prompt(Language.HINDI)
         self.assertIn("Hindi", prompt)
 
+    def test_kannada(self) -> None:
+        prompt = build_system_prompt(Language.KANNADA)
+        self.assertIn("Answer in Kannada.", prompt)
+
+    def test_telugu(self) -> None:
+        prompt = build_system_prompt(Language.TELUGU)
+        self.assertIn("Answer in Telugu.", prompt)
+
     def test_marathi(self) -> None:
         prompt = build_system_prompt(Language.HINDI)
         self.assertIn("Hindi", prompt)
+
+    def test_every_supported_language_has_display_name(self) -> None:
+        expected = {
+            Language.ENGLISH: "English",
+            Language.HINDI: "Hindi",
+            Language.KANNADA: "Kannada",
+            Language.TELUGU: "Telugu",
+        }
+        self.assertEqual(set(expected), set(Language))
+        for language, name in expected.items():
+            with self.subTest(language=language):
+                prompt = build_system_prompt(language)
+                self.assertIn(f"Answer in {name}.", prompt)
 
     def test_output_contract_instructions_present(self) -> None:
         prompt = build_system_prompt(Language.ENGLISH)
@@ -66,11 +87,12 @@ class TestBuildSystemPrompt(unittest.TestCase):
         prompt = build_system_prompt(Language.ENGLISH)
         self.assertIn("Output nothing before ANSWER:", prompt)
 
-    def test_contract_appears_for_both_languages(self) -> None:
-        for language in (Language.ENGLISH, Language.HINDI):
-            prompt = build_system_prompt(language)
-            self.assertIn("ANSWER:", prompt)
-            self.assertIn("CITATIONS:", prompt)
+    def test_contract_appears_for_all_supported_languages(self) -> None:
+        for language in Language:
+            with self.subTest(language=language):
+                prompt = build_system_prompt(language)
+                self.assertIn("ANSWER:", prompt)
+                self.assertIn("CITATIONS:", prompt)
 
     def test_existing_rules_unchanged(self) -> None:
         prompt = build_system_prompt(Language.ENGLISH)

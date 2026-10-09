@@ -128,6 +128,8 @@ def build_system_prompt(language: Language) -> str:
     lang_name = {
         Language.ENGLISH: "English",
         Language.HINDI: "Hindi",
+        Language.KANNADA: "Kannada",
+        Language.TELUGU: "Telugu",
     }.get(language, "English")
 
     return (
