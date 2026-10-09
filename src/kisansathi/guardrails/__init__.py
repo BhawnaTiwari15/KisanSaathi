@@ -323,17 +323,23 @@ def _handle_generated_answer(
         }
 
     if generated_answer.status == ResponseStatus.NEEDS_CLARIFICATION:
-        # MalformedOutputError or GroundingError
-        _log_guardrail(GuardrailCategory.GENERATION_MALFORMED, "retrieval", language, "malformed or ungrounded output")
-        return {
-            **state,
-            "response": AssistantResponse(
-                text=generated_answer.text,
-                language=language,
-                status=ResponseStatus.NEEDS_CLARIFICATION,
-                citations=(),
-            ),
-        }
+        # MalformedOutputError or GroundingError.
+        # If usable official evidence was available (resolved and/or validated citations),
+        # the model produced malformed/ungrounded output despite having sources, so ask for
+        # clarification. If no usable official evidence exists at all, fall through to Gate 4
+        # so the response abstains instead of asking an unanswerable clarification.
+        if validated_citations or citation_batch.citations:
+            _log_guardrail(GuardrailCategory.GENERATION_MALFORMED, "retrieval", language, "malformed or ungrounded output")
+            return {
+                **state,
+                "response": AssistantResponse(
+                    text=generated_answer.text,
+                    language=language,
+                    status=ResponseStatus.NEEDS_CLARIFICATION,
+                    citations=(),
+                ),
+            }
+        # Fall through to Gate 4 (no usable official evidence -> ABSTAINED)
 
     # Gate 3: Citation validation - generated answer cites IDs not in validated_citations
     if generated_answer.citation_ids:

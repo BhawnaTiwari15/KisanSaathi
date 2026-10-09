@@ -2,13 +2,18 @@ import unittest
 from typing import Any
 from unittest.mock import patch
 
+from kisansathi.citations.models import CitationBatch
 from kisansathi.domain.schemas import (
     AssistantResponse,
+    Citation,
     Language,
     ResponseStatus,
     UserMessage,
 )
+from kisansathi.eligibility.models import EligibilityDecision, EligibilityStatus
+from kisansathi.generation.models import GeneratedAnswer, ResponseStatus as GenResponseStatus
 from kisansathi.orchestration.graph import OrchestrationState, build_graph
+from kisansathi.guardrails import apply_final_guardrails
 from kisansathi.retrieval.vector_store import SearchResult
 from kisansathi.weather.client import OpenMeteoClient
 from kisansathi.weather.exceptions import WeatherRequestError
@@ -89,6 +94,17 @@ def make_result(chunk_id: str) -> SearchResult:
         "text": "Test text",
     }
     return SearchResult(score=1.0, payload=payload)
+
+
+def make_citation(chunk_id: str) -> Citation:
+    return Citation(
+        source_id="test-source",
+        title="Test Title",
+        url="https://example.gov.in/test",
+        page_number=1,
+        issuing_authority="Test Authority",
+        chunk_id=chunk_id,
+    )
 
 
 def make_weather_response(
@@ -524,6 +540,93 @@ class CrossRouteIsolationTests(unittest.TestCase):
 
         self.assertEqual(result["route"], "retrieval")
         self.assertEqual(weather_client.calls, [])
+
+
+class GuardrailsBehaviorTests(unittest.TestCase):
+    """Tests for the guardrails final policy decisions."""
+
+    def test_insufficient_official_evidence_no_citations_abstained(self) -> None:
+        """Insufficient official evidence with no validated citations -> ABSTAINED."""
+        state = {
+            "message": UserMessage(text="What is the price of wheat today in Haldwani?", language=Language.ENGLISH),
+            "detected_language": None,
+            "generated_answer": GeneratedAnswer(
+                text="The provided evidence is insufficient to answer the price of wheat today in Haldwani.",
+                citation_ids=(),
+                status=GenResponseStatus.NEEDS_CLARIFICATION,
+                language=Language.ENGLISH,
+            ),
+            "citations": CitationBatch(),
+            "validated_citations": (),
+            "retrieved_chunks": (make_result("c1"),),
+            "route": "retrieval",
+        }
+        result = apply_final_guardrails(state, "retrieval")
+        self.assertEqual(result["response"].status, ResponseStatus.ABSTAINED)
+        self.assertEqual(result["response"].citations, ())
+
+    def test_malformed_output_with_citations_needs_clarification(self) -> None:
+        """Malformed output while official evidence exists -> NEEDS_CLARIFICATION."""
+        citation = make_citation("test-source:" + "a" * 24)
+        state = {
+            "message": UserMessage(text="Test question", language=Language.ENGLISH),
+            "detected_language": None,
+            "generated_answer": GeneratedAnswer(
+                text="I could not produce a reliable answer from the available sources.",
+                citation_ids=(),
+                status=GenResponseStatus.NEEDS_CLARIFICATION,
+                language=Language.ENGLISH,
+            ),
+            "citations": CitationBatch(citations=(citation,)),
+            "validated_citations": (),
+            "retrieved_chunks": (make_result("c1"),),
+            "route": "retrieval",
+        }
+        result = apply_final_guardrails(state, "retrieval")
+        self.assertEqual(result["response"].status, ResponseStatus.NEEDS_CLARIFICATION)
+        self.assertEqual(result["response"].citations, ())
+
+    def test_valid_grounded_answer_with_valid_citations_answered(self) -> None:
+        """Valid grounded answer with valid citations -> ANSWERED."""
+        chunk_id = "test-source:" + "b" * 24
+        citation = make_citation(chunk_id)
+        state = {
+            "message": UserMessage(text="Test question", language=Language.ENGLISH),
+            "detected_language": None,
+            "generated_answer": GeneratedAnswer(
+                text="Based on the evidence, the answer is yes.",
+                citation_ids=(chunk_id,),
+                status=GenResponseStatus.ANSWERED,
+                language=Language.ENGLISH,
+            ),
+            "citations": CitationBatch(citations=(citation,)),
+            "validated_citations": (citation,),
+            "retrieved_chunks": (make_result("c1"),),
+            "route": "retrieval",
+        }
+        result = apply_final_guardrails(state, "retrieval")
+        self.assertEqual(result["response"].status, ResponseStatus.ANSWERED)
+        self.assertEqual(len(result["response"].citations), 1)
+
+    def test_missing_eligibility_facts_needs_clarification(self) -> None:
+        """Missing user-provided eligibility facts -> NEEDS_CLARIFICATION."""
+        state = {
+            "message": UserMessage(text="Am I eligible for PM-KISAN?", language=Language.ENGLISH),
+            "detected_language": None,
+            "citations": CitationBatch(),
+            "validated_citations": (),
+            "retrieved_chunks": (),
+            "route": "eligibility",
+            "eligibility_decision": EligibilityDecision(
+                scheme="PM-KISAN",
+                status=EligibilityStatus.INSUFFICIENT_INFORMATION,
+                summary="Missing required facts for eligibility determination.",
+                missing_facts=("landholding_in_own_name", "land_is_cultivable"),
+            ),
+        }
+        result = apply_final_guardrails(state, "eligibility")
+        self.assertEqual(result["response"].status, ResponseStatus.NEEDS_CLARIFICATION)
+        self.assertIn("Please provide the following", result["response"].text)
 
 
 if __name__ == "__main__":
